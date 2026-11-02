@@ -7,7 +7,7 @@
 
 > **灵犀**是装在自己电脑（或自己服务器）上的私有知识库：把散在磁盘里的文档、图片、录音
 > 变成可搜、可问、可管的东西——答案带出处，数据一步不出本机。
-> 当前版本 **v3.5.3**（2026-10-27）｜仓库：<https://github.com/admin-qq/lingxi>
+> 当前版本 **v3.5.3**（2026-10-27）｜仓库：<https://github.com/yqdnsjs-qq/lingxi>
 
 把 Google 的 [google/embeddinggemma-2](https://huggingface.co/google/embeddinggemma-2) 多模态嵌入模型
 完整部署在**本文件夹内**，并附带一个**本地文件语义搜索程序**：选一个文件夹建立索引，
