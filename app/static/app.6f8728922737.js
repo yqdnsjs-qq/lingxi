@@ -1,7 +1,7 @@
 // 版本标记：F12 Console 里能看到，方便判断"你打开的是不是最新页面"
 // （改完前端一定要 Ctrl+F5 硬刷新，普通刷新有时还是旧 JS）
-const EG2_BUILD = '2026-11-02-16:20';
-const EG2_VER = '3.5.4';
+const EG2_BUILD = '2026-11-02-17:20';
+const EG2_VER = '3.5.5';
 try { console.log('%c灵犀 v' + EG2_VER + ' build ' + EG2_BUILD, 'color:#5b9dff;font-weight:bold'); } catch (e) {}
 
 /* ---------------- 🔐 界面缓存按账号隔离（2026-10-21）----------------
@@ -3151,6 +3151,7 @@ async function openOcrSettings() {
         <div class="hint" style="margin-top:4px">
           auto = 扫描版优先 MinerU，它没运行就退回 PP-OCRv6 ✓<br>
           MinerU API：${s.mineru_api ? '<b style="color:#4caf50">运行中</b>' : '未运行'} ·
+          OXR API：${s.oxr_api ? '<b style="color:#4caf50">运行中</b>' : '未运行'} ·
           显存：${esc(s.free_hint || '未知')} · 当前自动批量：${s.auto_batch} 页/批
         </div>
       </div>
@@ -3193,7 +3194,7 @@ async function openOcrSettings() {
           <div class="hint">
             只有「本机不可用」的引擎才需要填。填的是<b>那个环境里</b>的
             python.exe 和桥接脚本：<br>
-            · <b>PP-OCRv6</b>（要 GPU）　· <b>RapidOCR</b>（纯 CPU，最轻）　· <b>MinerU</b>（最强，要先跑它的 API）
+            · <b>PP-OCRv6</b>（要 GPU）　· <b>RapidOCR</b>（纯 CPU，最轻）　· <b>MinerU</b>（最强，要先跑它的 API）　· <b>OXR</b>（版面/表格最像原文，要先跑 OXR）
           </div>
           <label style="display:grid;gap:3px">
             <span class="hint">PP-OCRv6 · python</span>
@@ -3229,6 +3230,18 @@ async function openOcrSettings() {
             <span class="hint">MinerU · 桥接脚本</span>
             <input id="ocr-p-mineru-br" value="${esc((s.paths || {}).mineru_bridge || '')}"
                    placeholder="...\\MinerU\\tools\\submit_mineru_task.py"
+                   style="font:12.5px Consolas,monospace">
+          </label>
+          <label style="display:grid;gap:3px">
+            <span class="hint">OXR · 解析服务地址（HTTP，不用填 python）</span>
+            <input id="ocr-p-oxr-api" value="${esc((s.paths || {}).oxr_api || '')}"
+                   placeholder="http://127.0.0.1:8000"
+                   style="font:12.5px Consolas,monospace">
+          </label>
+          <label style="display:grid;gap:3px">
+            <span class="hint">OXR · 桥接脚本</span>
+            <input id="ocr-p-oxr-br" value="${esc((s.paths || {}).oxr_bridge || '')}"
+                   placeholder="...\run\ocr_bridges\oxr_bridge.py"
                    style="font:12.5px Consolas,monospace">
           </label>
           <div class="hint">

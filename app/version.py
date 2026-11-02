@@ -9,11 +9,18 @@
 """
 from __future__ import annotations
 
-VERSION = "3.5.4"
-BUILD = "2026-11-02-16:20"            # 前端 EG2_BUILD 用同一个值
+VERSION = "3.5.5"
+BUILD = "2026-11-02-17:20"            # 前端 EG2_BUILD 用同一个值
 
 # 最近几条（新的在前）；完整的看 docs/更新日志.md
 CHANGELOG: list[tuple[str, list[str]]] = [
+    ("3.5.5", [
+        "新增第 4 个 OCR 引擎 OXR：版面理解 + 表格还原，扫出来的表格会变成真正的 HTML 表格",
+        "OXR 走 HTTP 桥接（D:\\GJ\\AIOXR 那三个服务），不占灵犀自己的显存，两个项目互不干扰",
+        "设置页 OCR 引擎下拉多一项 oxr，并显示「OXR API：运行中/未运行」与地址、桥脚本路径",
+        "修：系统 NO_PROXY 里带 [::1] 时，所有 OCR 桥脚本一启动就崩（httpx 报 Invalid port）",
+        "桥脚本统一强制 UTF-8 输出，GBK 控制台下不再因报错信息里的 emoji 二次崩溃",
+    ]),
     ("3.5.4", [
         "启动不再出现黑色命令行窗口：服务在后台跑，也不会被误关（要停请双击 stop.bat）",
         "新增「启动灵犀.vbs」：双击即启动，全程无窗口；失败才弹提示框",

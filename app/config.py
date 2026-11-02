@@ -377,12 +377,12 @@ class Config:
 
     @property
     def ocr_engine(self) -> str:
-        """OCR 引擎：auto / mineru / ppocr / ppocr_cpu / rapid。
+        """OCR 引擎：auto / mineru / ppocr / ppocr_cpu / rapid / oxr。
 
         auto = 有文字层就不 OCR；扫描版优先 mineru，它不可用就 ppocr ✓
         """
         v = (self._get("search", "ocr_engine", "auto") or "auto").strip().lower()
-        return v if v in ("auto", "mineru", "ppocr", "ppocr_cpu", "rapid") else "auto"
+        return v if v in ("auto", "mineru", "ppocr", "ppocr_cpu", "rapid", "oxr") else "auto"
 
     @property
     def ocr_enabled(self) -> bool:

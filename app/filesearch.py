@@ -1694,6 +1694,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
             "page_to": cfg.ocr_page_to,              # 0 = 到最后一页
             "engines": _ocr.list_engines(),
             "mineru_api": _ocr.mineru_api_alive(),
+            "oxr_api": _ocr.oxr_api_alive(),
             "free_hint": _ocr.free_gpu_hint(),
             "auto_batch": _ocr.auto_batch(),
             "min_chars_per_page": _ocr.MIN_CHARS_PER_PAGE,
@@ -1708,6 +1709,9 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                 "mineru_bridge": str(_ocr.ENGINES["mineru"]["bridge"]),
                 "mineru_dir": (_ocr._ini_ocr().get("mineru_dir")   # noqa: SLF001
                                 or os.environ.get("EG2_OCR_MINERU_DIR", "")),
+                "oxr_api": (_ocr._ini_ocr().get("oxr_api")      # noqa: SLF001
+                            or "http://127.0.0.1:8000"),
+                "oxr_bridge": str(_ocr.ENGINES["oxr"]["bridge"]),
             },
         }
 
@@ -1770,15 +1774,17 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         if isinstance(payload.get("paths"), dict):
             _VALID_KEYS = {"ppocr_python", "ppocr_bridge", "rapid_python",
                            "rapid_bridge", "mineru_python", "mineru_bridge",
-                           "mineru_dir"}
+                           "mineru_dir", "oxr_api", "oxr_bridge"}
             for k, v in (payload.get("paths") or {}).items():
                 k = str(k).strip().lower()
                 if k not in _VALID_KEYS:
                     warnings.append(f"不认识的路径项 {k!r}，已忽略")
                     continue
                 s = str(v or "").strip()
-                if s and not (s.endswith(".exe") or s.endswith(".py")
-                              or os.path.isdir(s)):
+                is_url = s.startswith("http://") or s.startswith("https://")
+                if s and not is_url and not (s.endswith(".exe")
+                                             or s.endswith(".py")
+                                             or os.path.isdir(s)):
                     # 允许目录（mineru_dir），也允许暂时填一个还没装好的路径
                     warnings.append(f"{k} 看起来不像可执行文件/脚本/目录，仍已保存")
                 values[f"ocr_{k}"] = s

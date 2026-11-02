@@ -22,8 +22,12 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from contextlib import AbstractContextManager
 from pathlib import Path
+
+# 项目根目录（桥脚本、venv 都在它下面）
+ROOT = Path(__file__).resolve().parent.parent
 
 log = logging.getLogger("eg2.ocr")
 
@@ -179,6 +183,17 @@ ENGINES: dict[str, dict] = {
         "label": "MinerU（结构化 Markdown + 自动提图，最强）",
         "gpu": True,
     },
+    "oxr": {
+        # ★ 2026-11-02 项目主新部署了 OXR（D:\GJ\AIOXR），走 HTTP 桥接进来。
+        #   它自己带三个服务（解析 8000 / 模型 8080 / 布局 8081），
+        #   灵犀这边只发 HTTP，不占自己的显存，也不会互相抢卡 ✓
+        "python": _p("EG2_OCR_OXR_PY", "oxr_python", sys.executable),
+        "bridge": _p("EG2_OCR_OXR_BRIDGE", "oxr_bridge",
+                     str(ROOT / "run" / "ocr_bridges" / "oxr_bridge.py")),
+        "args": ["--api", _ini_ocr().get("oxr_api", "http://127.0.0.1:8000")],
+        "label": "OXR（版面理解 + 表格还原，最像原文）",
+        "gpu": False,          # 用 AIOXR 那边的显存，不算灵犀的
+    },
 }
 
 
@@ -191,8 +206,22 @@ def list_engines() -> list[dict]:
         if name == "mineru":
             item["note"] = "需要 MinerU 的 API 在运行（run-api.cmd）"
             item["api_up"] = mineru_api_alive()
+        if name == "oxr":
+            item["note"] = "需要 OXR 的三个服务在运行（1-启动 OXR.bat）"
+            item["api_up"] = oxr_api_alive()
         out.append(item)
     return out
+
+
+def oxr_api_alive(timeout: float = 3.0) -> bool:
+    """OXR 的解析服务（默认 127.0.0.1:8000）在跑吗。"""
+    api = (_ini_ocr().get("oxr_api") or os.environ.get("EG2_OCR_OXR_API")
+           or "http://127.0.0.1:8000")
+    try:
+        with urllib.request.urlopen(api.rstrip("/") + "/docs", timeout=timeout) as r:
+            return r.status < 500
+    except Exception:                                            # noqa: BLE001
+        return False
 
 
 def mineru_api_alive(timeout: float = 3.0) -> bool:
@@ -236,6 +265,33 @@ def start_mineru_api(wait_seconds: int = 120) -> tuple[bool, str]:
     return False, f"等了 {wait_seconds} 秒还没起来"
 
 
+def _clean_env() -> dict:
+    """给桥脚本用的环境变量：把 NO_PROXY 里 `[::1]` 这种写法去掉。
+
+    2026-11-02 实测：系统 NO_PROXY 里有 `[::1]`，PP-OCR 桥一 import 就炸 ——
+    httpx 把 `[::1]` 当成 proxy URL 解析，报 `InvalidURL: Invalid port: ':1]'` ✗
+    （换成 `::1` 就正常；两者含义一样，只是不能带方括号）
+    """
+    env = dict(os.environ)
+    for key in ("NO_PROXY", "no_proxy"):
+        raw = env.get(key)
+        if not raw:
+            continue
+        items = []
+        for part in raw.split(","):
+            item = part.strip()
+            if not item:
+                continue
+            if item.startswith("[") and item.endswith("]"):
+                item = item[1:-1]          # [::1] → ::1
+            items.append(item)
+        env[key] = ",".join(items)
+    # 桥脚本一律 UTF-8 输出：GBK 控制台下 print 带 emoji 的报错会二次崩溃
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    return env
+
+
 def run_engine(engine: str, images: list[Path],
                timeout: float = 3600) -> dict:
     """跑一个引擎，返回统一结构。
@@ -257,6 +313,10 @@ def run_engine(engine: str, images: list[Path],
         return {"ok": False, "engine": engine,
                 "error": "MinerU 的 API 没在跑（先运行 D:\\GJ\\MinerU\\run-api.cmd）",
                 "pages": []}
+    if engine == "oxr" and not oxr_api_alive():
+        return {"ok": False, "engine": engine,
+                "error": "OXR 的解析服务没在跑（先运行 D:\\GJ\\AIOXR\\1-启动 OXR.bat）",
+                "pages": []}
 
     files = [str(p) for p in images]
     cmd = [str(exe), str(bridge)] + files + list(spec.get("args") or [])
@@ -264,7 +324,8 @@ def run_engine(engine: str, images: list[Path],
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               encoding="utf-8", errors="replace",
-                              timeout=timeout, cwd=str(bridge.parent))
+                              timeout=timeout, cwd=str(bridge.parent),
+                              env=_clean_env())
     except subprocess.TimeoutExpired:
         return {"ok": False, "engine": engine, "error": f"超时（>{timeout:.0f} 秒）",
                 "pages": [], "elapsed": time.time() - t0}
