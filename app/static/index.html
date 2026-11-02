@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>EmbeddingGemma 2 本地服务</title>
+<style>
+  :root{
+    --bg:#0f1420; --panel:#171e2e; --panel2:#1e2739; --line:#2b3648;
+    --fg:#e7ecf5; --muted:#93a1b8; --accent:#5b9dff; --ok:#3ddc97; --warn:#ffb454;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif}
+  header{padding:18px 24px;border-bottom:1px solid var(--line);
+         display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:var(--panel)}
+  h1{font-size:17px;margin:0;font-weight:600}
+  .badge{font-size:12px;padding:2px 9px;border-radius:999px;background:#233046;color:var(--muted)}
+  .badge.ok{background:rgba(61,220,151,.15);color:var(--ok)}
+  .badge.err{background:rgba(255,120,120,.15);color:#ff8f8f}
+  main{max-width:1080px;margin:0 auto;padding:20px 24px 60px}
+  .tabs{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+  .tab{padding:8px 16px;border-radius:8px;background:var(--panel);cursor:pointer;
+       border:1px solid var(--line);color:var(--muted);user-select:none}
+  .tab.active{background:var(--accent);border-color:var(--accent);color:#fff}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px}
+  label{display:block;font-size:12px;color:var(--muted);margin:10px 0 5px}
+  textarea,input[type=text],select{width:100%;background:var(--panel2);border:1px solid var(--line);
+       color:var(--fg);border-radius:8px;padding:9px 11px;font:inherit;outline:none}
+  textarea{min-height:110px;resize:vertical;font-family:ui-monospace,Consolas,monospace}
+  textarea:focus,input:focus,select:focus{border-color:var(--accent)}
+  .row{display:flex;gap:12px;flex-wrap:wrap}
+  .row>div{flex:1;min-width:170px}
+  button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:10px 20px;
+         font:inherit;font-weight:600;cursor:pointer;margin-top:14px}
+  button:disabled{opacity:.5;cursor:default}
+  button.ghost{background:var(--panel2);border:1px solid var(--line);color:var(--fg);font-weight:400}
+  pre{background:#0b101a;border:1px solid var(--line);border-radius:8px;padding:12px;
+      overflow:auto;max-height:420px;font:12px/1.5 ui-monospace,Consolas,monospace;color:#c8d4e8}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:13px}
+  .kv b{color:var(--muted);font-weight:500}
+  .files{display:flex;gap:16px;flex-wrap:wrap}
+  .files>div{flex:1;min-width:180px}
+  .hint{font-size:12px;color:var(--muted);margin-top:8px}
+  .score{font-size:26px;font-weight:700;color:var(--ok)}
+  .err{color:#ff9c9c}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>EmbeddingGemma 2 · 本地嵌入服务</h1>
+  <span id="status" class="badge">连接中…</span>
+  <span id="meta" class="badge"></span>
+  <span style="flex:1"></span>
+  <a href="/search" style="color:var(--accent);font-size:12px">🔍 宇之语 · 灵犀</a>
+  <a href="/docs" target="_blank" style="color:var(--accent);font-size:12px">API 文档</a>
+</header>
+
+<main>
+  <div class="tabs">
+    <div class="tab active" data-tab="text">文本嵌入</div>
+    <div class="tab" data-tab="multi">多模态嵌入</div>
+    <div class="tab" data-tab="sim">相似度对比</div>
+  </div>
+
+  <!-- 文本嵌入 -->
+  <section id="tab-text">
+    <div class="card">
+      <label>文本（每行一条，可一次多条）</label>
+      <textarea id="t-input">什么是极光？
+极光是由太阳带电粒子与地球高层大气碰撞产生的发光现象。</textarea>
+      <div class="row">
+        <div>
+          <label>任务前缀（prompt_name）</label>
+          <select id="t-prompt">
+            <option value="none">none（不加上下文）</option>
+            <option value="SearchQuery">SearchQuery（检索查询）</option>
+            <option value="Document">Document（文档）</option>
+            <option value="QuestionAnswering">QuestionAnswering（问答）</option>
+            <option value="FactChecking">FactChecking（事实核查）</option>
+            <option value="CodeRetrieval">CodeRetrieval（代码检索）</option>
+            <option value="Classification">Classification（分类）</option>
+            <option value="Clustering">Clustering（聚类）</option>
+            <option value="SentenceSimilarity">SentenceSimilarity（相似度）</option>
+          </select>
+        </div>
+        <div>
+          <label>输出维度</label>
+          <select id="t-dim">
+            <option value="">模型默认（768）</option>
+            <option value="512">512</option>
+            <option value="256">256</option>
+            <option value="128">128</option>
+          </select>
+        </div>
+      </div>
+      <button id="t-go">生成向量</button>
+      <button id="t-copy" class="ghost">复制为 cURL 示例</button>
+      <div id="t-out"></div>
+    </div>
+  </section>
+
+  <!-- 多模态嵌入 -->
+  <section id="tab-multi" class="hidden">
+    <div class="card">
+      <label>文本（可选，可用 &lt;|image|&gt; &lt;|video|&gt; &lt;|audio|&gt; 占位符控制插入位置）</label>
+      <textarea id="m-text" style="min-height:80px">示例：一张产品图片 &lt;|image|&gt;</textarea>
+      <div class="files">
+        <div><label>图片（可多选）</label><input type="file" id="m-image" accept="image/*" multiple></div>
+        <div><label>音频</label><input type="file" id="m-audio" accept="audio/*"></div>
+        <div><label>视频</label><input type="file" id="m-video" accept="video/*"></div>
+      </div>
+      <div class="row">
+        <div>
+          <label>输出维度</label>
+          <select id="m-dim">
+            <option value="">模型默认（768）</option>
+            <option value="512">512</option>
+            <option value="256">256</option>
+            <option value="128">128</option>
+          </select>
+        </div>
+      </div>
+      <button id="m-go">生成向量</button>
+      <div class="hint">大文件会以 base64 传给本机服务，视频/音频建议 1 分钟以内。</div>
+      <div id="m-out"></div>
+    </div>
+  </section>
+
+  <!-- 相似度 -->
+  <section id="tab-sim" class="hidden">
+    <div class="card">
+      <div class="row">
+        <div><label>文本 A</label><textarea id="s-a">苹果手机怎么选</textarea></div>
+        <div><label>文本 B</label><textarea id="s-b">iPhone 购买建议</textarea></div>
+      </div>
+      <div class="row">
+        <div>
+          <label>任务前缀</label>
+          <select id="s-prompt">
+            <option value="SentenceSimilarity">SentenceSimilarity（相似度任务）</option>
+            <option value="none">none</option>
+            <option value="Classification">Classification</option>
+            <option value="Clustering">Clustering</option>
+          </select>
+        </div>
+        <div>
+          <label>输出维度</label>
+          <select id="s-dim">
+            <option value="">768</option><option value="512">512</option>
+            <option value="256">256</option><option value="128">128</option>
+          </select>
+        </div>
+      </div>
+      <button id="s-go">计算余弦相似度</button>
+      <div id="s-out"></div>
+    </div>
+  </section>
+
+  <div class="card">
+    <h2 style="font-size:14px;margin:0 0 10px;color:var(--muted);font-weight:600">运行模式与设置</h2>
+    <div id="settings"></div>
+  </div>
+
+  <div class="card">
+    <label>接口调用示例（可直接给其它程序使用）</label>
+    <pre>curl http://127.0.0.1:8199/v1/embeddings ^
+  -H "Content-Type: application/json" ^
+  -d "{\"input\": [\"第一段文本\", \"第二段文本\"], \"dimensions\": 256}"</pre>
+    <div class="hint">OpenAI 兼容：把任意支持自定义 base_url 的客户端指向
+      <code>http://127.0.0.1:8199/v1</code> 即可（api_key 随便填）。</div>
+  </div>
+</main>
+
+<script src="/static/settings.js"></script>
+<script>
+const $ = (s) => document.querySelector(s);
+const api = (p, opt) => fetch(p, opt).then(async (r) => {
+  const t = await r.text();
+  let j = null; try { j = JSON.parse(t); } catch (e) { j = { raw: t }; }
+  if (!r.ok) throw new Error((j && (j.detail || (j.error && j.error.message))) || t);
+  return j;
+});
+
+// 标签切换
+document.querySelectorAll('.tab').forEach((el) => el.onclick = () => {
+  document.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
+  el.classList.add('active');
+  ['text', 'multi', 'sim'].forEach((k) => $('#tab-' + k).classList.toggle('hidden', k !== el.dataset.tab));
+});
+
+// 状态
+window.EG2OnSettingsChanged = () => {
+  api('/health').then((h) => {
+    const badge = $('#status');
+    badge.textContent = '运行中 · ' + h.device + ' / ' + h.dtype;
+    badge.className = 'badge ok';
+    $('#meta').textContent = h.modality + ' · ' + h.dimension + ' 维 · pid ' + h.pid;
+  }).catch(() => {});
+};
+(async () => {
+  const badge = $('#status');
+  try {
+    const h = await api('/health');
+    badge.textContent = '运行中 · ' + h.device + ' / ' + h.dtype;
+    badge.className = 'badge ok';
+    $('#meta').textContent = h.modality + ' · ' + h.dimension + ' 维 · pid ' + h.pid;
+  } catch (e) {
+    badge.textContent = '连接失败';
+    badge.className = 'badge err';
+  }
+  EG2Settings.mount('settings');
+})();
+
+function vecPreview(v, n = 8) {
+  const head = v.slice(0, n).map((x) => (x >= 0 ? '+' : '') + x.toFixed(5));
+  return '[' + head.join(', ') + (v.length > n ? ', … 共 ' + v.length + ' 维]' : ']');
+}
+function cos(a, b) {
+  let d = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { d += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return d / (Math.sqrt(na) * Math.sqrt(nb) || 1);
+}
+const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+// 文本嵌入
+$('#t-go').onclick = async () => {
+  const texts = $('#t-input').value.split('\n').map((s) => s.trim()).filter(Boolean);
+  if (!texts.length) return alert('请输入文本');
+  const out = $('#t-out'); out.innerHTML = '<p class="hint">计算中…</p>'; $('#t-go').disabled = true;
+  const body = { input: texts, prompt_name: $('#t-prompt').value };
+  const dim = $('#t-dim').value; if (dim) body.dimensions = +dim;
+  try {
+    const r = await api('/embed', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    let html = '<div class="kv"><b>条数</b><span>' + r.count + '</span><b>维度</b><span>' + r.dimension +
+      '</span><b>耗时</b><span>' + r.elapsed_seconds + ' 秒</span><b>前缀</b><span>' + (r.prompt_name || '（无）') + '</span></div>';
+    r.embeddings.forEach((v, i) => {
+      html += '<label>#' + i + ' ' + esc(texts[i].slice(0, 40)) + '</label><pre>' + esc(vecPreview(v)) + '</pre>';
+    });
+    if (r.embeddings.length > 1) {
+      html += '<label>两两余弦相似度</label><pre>';
+      for (let i = 0; i < r.embeddings.length; i++)
+        for (let j = i + 1; j < r.embeddings.length; j++)
+          html += '#' + i + ' ↔ #' + j + ' : ' + cos(r.embeddings[i], r.embeddings[j]).toFixed(6) + '\n';
+      html += '</pre>';
+    }
+    out.innerHTML = html;
+  } catch (e) { out.innerHTML = '<pre class="err">' + esc(e.message) + '</pre>'; }
+  finally { $('#t-go').disabled = false; }
+};
+
+$('#t-copy').onclick = () => {
+  const texts = $('#t-input').value.split('\n').map((s) => s.trim()).filter(Boolean);
+  const dim = $('#t-dim').value;
+  const payload = { input: texts, prompt_name: $('#t-prompt').value };
+  if (dim) payload.dimensions = +dim;
+  const cmd = 'curl http://127.0.0.1:8199/v1/embeddings -H "Content-Type: application/json" -d "' +
+    JSON.stringify(payload).replace(/"/g, '\\"') + '"';
+  navigator.clipboard.writeText(cmd).then(() => alert('已复制到剪贴板'));
+};
+
+// 多模态
+const readAsDataURL = (f) => new Promise((res, rej) => {
+  const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f);
+});
+
+$('#m-go').onclick = async () => {
+  const out = $('#m-out'); out.innerHTML = '<p class="hint">读取文件并计算中…</p>'; $('#m-go').disabled = true;
+  try {
+    const item = {};
+    const text = $('#m-text').value.trim(); if (text) item.text = text;
+    const imgs = $('#m-image').files;
+    if (imgs.length) { const arr = []; for (const f of imgs) arr.push(await readAsDataURL(f)); item.image = arr.length === 1 ? arr[0] : arr; }
+    if ($('#m-audio').files[0]) item.audio = await readAsDataURL($('#m-audio').files[0]);
+    if ($('#m-video').files[0]) item.video = await readAsDataURL($('#m-video').files[0]);
+    if (!Object.keys(item).length) throw new Error('请至少填入文本或选择文件');
+    const body = { input: item };
+    const dim = $('#m-dim').value; if (dim) body.dimensions = +dim;
+    const r = await api('/embed', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    out.innerHTML = '<div class="kv"><b>维度</b><span>' + r.dimension + '</span><b>耗时</b><span>' +
+      r.elapsed_seconds + ' 秒</span></div><pre>' + esc(vecPreview(r.embeddings[0], 12)) + '</pre>';
+  } catch (e) { out.innerHTML = '<pre class="err">' + esc(e.message) + '</pre>'; }
+  finally { $('#m-go').disabled = false; }
+};
+
+// 相似度
+$('#s-go').onclick = async () => {
+  const out = $('#s-out'); out.innerHTML = '<p class="hint">计算中…</p>'; $('#s-go').disabled = true;
+  try {
+    const body = { input: [$('#s-a').value, $('#s-b').value], prompt_name: $('#s-prompt').value };
+    const dim = $('#s-dim').value; if (dim) body.dimensions = +dim;
+    const r = await api('/v1/embeddings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const s = cos(r.data[0].embedding, r.data[1].embedding);
+    out.innerHTML = '<label>余弦相似度</label><div class="score">' + s.toFixed(6) + '</div>' +
+      '<div class="hint">' + (s > 0.8 ? '高度相似' : s > 0.6 ? '比较相似' : s > 0.4 ? '中等相关' : '相关性较低') + '</div>' +
+      '<pre>' + esc(vecPreview(r.data[0].embedding)) + '</pre>';
+  } catch (e) { out.innerHTML = '<pre class="err">' + esc(e.message) + '</pre>'; }
+  finally { $('#s-go').disabled = false; }
+};
+</script>
+</body>
+</html>

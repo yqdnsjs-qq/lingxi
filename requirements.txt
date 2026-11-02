@@ -1,0 +1,31 @@
+# EmbeddingGemma 2 运行依赖（PyTorch 单独安装，见 setup.bat）
+# 说明：这里不用 transformers[audio] / [video] 附加项，
+#       因为 audio 附加项会拉入 kenlm、phonemizer 等本模型不需要、
+#       且在 Windows 上编译困难的包。下面只装真正需要的解码库。
+
+transformers>=5.19.0,<6.0.0
+sentence-transformers>=6.1.0,<7.0.0
+huggingface_hub>=1.0.0
+accelerate>=1.0.0
+safetensors>=0.4.0
+
+# 图像 / 音频 / 视频 解码
+pillow>=10.0.0
+# HEIC/HEIF（iPhone 照片）支持；没有它也能跑，只是这类照片索引不了
+pillow-heif>=0.18.0
+numpy>=1.26
+soundfile>=0.12.1
+librosa>=0.10.1
+av>=12.0.0
+
+# PDF 正文抽取（没有它也能用，只是 PDF 只能按文件名检索）
+pypdf>=5.0.0
+# PDF 页面渲染成图片，用来「看原版式」（表格样式）。
+# 没有它也能用：PDF 预览只给按页文字，界面上会提示装它。
+pymupdf>=1.24.0
+
+# HTTP 服务
+fastapi>=0.115.0
+uvicorn>=0.30.0
+pydantic>=2.7.0
+python-multipart>=0.0.9

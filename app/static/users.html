@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" sizes="64x64" href="/static/favicon.png?v=20261022a"><link rel="shortcut icon" href="/static/favicon.png?v=20261022a"><link rel="apple-touch-icon" href="/static/logo-128.png?v=20261022a">
+<title>宇之语 · 灵犀 — 用户管理</title>
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--panel2:#1c232d;--fg:#e7ecf5;--muted:#93a1b8;
+        --line:#2a3340;--accent:#5b9dff;--ok:#3ddc97;--warn:#ffb454;--bad:#ff8f8f}
+  *{box-sizing:border-box}
+  body{margin:0;padding:28px 20px;background:var(--bg);color:var(--fg);
+       font:15px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  .wrap{max-width:940px;margin:0 auto}
+  h1{font-size:19px;margin:0 0 14px}
+  .hint{color:var(--muted);font-size:13px}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:500;font-size:13px}
+  tr.pending{background:rgba(255,180,84,.07)}
+  .tag{padding:1px 8px;border-radius:999px;font-size:12.5px;border:1px solid var(--line)}
+  .t-active{color:var(--ok);border-color:var(--ok)}
+  .t-pending{color:var(--warn);border-color:var(--warn)}
+  .t-disabled{color:var(--bad);border-color:var(--bad)}
+  button{padding:5px 11px;border-radius:8px;border:1px solid var(--line);
+         background:var(--panel2);color:var(--fg);font-size:13.5px;cursor:pointer;margin-right:5px}
+  button.primary{background:var(--accent);color:#08131f;border-color:var(--accent);font-weight:600}
+  button:disabled{opacity:.5;cursor:default}
+  .msg{margin:10px 0;min-height:22px;font-size:14px}
+  .ok{color:var(--ok)} .bad{color:var(--bad)}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div style="margin:0 0 14px">
+    <a href="/search" style="display:inline-block;padding:7px 14px;border-radius:9px;
+       border:1px solid var(--line);color:var(--fg);text-decoration:none;
+       background:var(--panel2);font-size:14px">← 返回搜索界面</a>
+    <a href="/static/shared.html" style="display:inline-block;padding:7px 14px;
+       border-radius:9px;border:1px solid var(--line);color:var(--fg);
+       text-decoration:none;background:var(--panel2);font-size:14px;
+       margin-left:8px">共享设置 →</a>
+    <span class="hint" style="margin-left:10px">（本机如果是独立窗口打开，用这些按钮切换）</span>
+  </div>
+  <h1>用户管理 <span class="hint" id="who"></span></h1>
+
+  <!-- ★ 2026-10-22：我的账号（所有登录用户都能改自己的名字/密码）-->
+  <div class="card" style="margin:12px 0;padding:12px 14px">
+    <b>我的账号</b>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:9px;align-items:center">
+      <span class="hint">用户名</span>
+      <input id="me-name-in" placeholder="新用户名（2~24 字）"
+             style="width:150px;padding:5px 8px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--fg)">
+      <input id="me-name-pwd" type="password" placeholder="当前密码（确认身份）"
+             style="width:180px;padding:5px 8px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--fg)">
+      <button id="me-name-go">改用户名</button>
+      <span class="hint" id="me-name-msg"></span>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center">
+      <span class="hint">密码</span>
+      <input id="me-pwd-old" type="password" placeholder="旧密码"
+             style="width:150px;padding:5px 8px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--fg)">
+      <input id="me-pwd-new" type="password" placeholder="新密码（至少 6 位）"
+             style="width:180px;padding:5px 8px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--fg)">
+      <button id="me-pwd-go">改密码</button>
+      <span class="hint" id="me-pwd-msg"></span>
+    </div>
+    <div class="hint" style="margin-top:8px">
+      改密码后，你在<b>其它设备</b>上的登录会失效（当前这台保留）✓
+    </div>
+  </div>
+
+  <!-- ★ 2026-10-22：注册开关（管理员直接切，立即生效，不用改 config.ini）-->
+  <div class="card admin-only" style="margin:12px 0;padding:12px 14px">
+    <label style="display:flex;gap:9px;align-items:center;cursor:pointer;
+                  font-size:14px;user-select:none">
+      <input type="checkbox" id="reg-sw" style="width:17px;height:17px;cursor:pointer">
+      <b>允许任何人自助注册</b>
+    </label>
+    <div class="hint" style="margin-top:6px">
+      打开后，登录页会出现「注册」入口；注册出来的账号状态是
+      <b>待审批</b>，仍需要你在下面点「审批通过」才能登录 ✓<br>
+      关掉后，只有你能在下面「新建用户」。当前：
+      <b id="reg-state">读取中…</b>
+    </div>
+  </div>
+
+  <!-- ★ 2026-10-22：管理员直接新建用户 -->
+  <div class="card admin-only" style="margin:12px 0;padding:12px 14px">
+    <b>新建用户</b>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:9px;align-items:center">
+      <input id="nu-name" placeholder="用户名（2~24 字）"
+             style="width:150px;padding:5px 8px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--fg)">
+      <input id="nu-pwd" type="password" placeholder="密码（至少 6 位）"
+             style="width:170px;padding:5px 8px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--fg)">
+      <select id="nu-role"
+              style="padding:5px 8px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--fg)">
+        <option value="user">普通用户</option>
+        <option value="admin">管理员</option>
+      </select>
+      <select id="nu-state"
+              style="padding:5px 8px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--fg)">
+        <option value="active">直接启用</option>
+        <option value="pending">待审批</option>
+      </select>
+      <button id="nu-go" class="primary">创建用户</button>
+      <span class="hint" id="nu-msg"></span>
+    </div>
+  </div>
+  <div class="msg" id="msg"></div>
+  <table>
+    <thead><tr>
+      <th style="width:46px">#</th><th>用户名</th><th style="width:96px">角色</th>
+      <th style="width:92px">状态</th><th style="width:150px">最近登录</th><th>操作</th>
+    </tr></thead>
+    <tbody id="rows"><tr><td colspan="6" class="hint">正在读取…</td></tr></tbody>
+  </table>
+  <div class="hint">
+    「审批通过」= 把状态改成<b>已启用</b>；「停用」会立刻让该用户已登录的会话失效。<br>
+    待审批的用户在通过之前无法登录 ✓
+  </div>
+  <p>
+    <a href="/static/shared.html">← 共享设置（文件夹的共享 / 私有）</a>
+    &nbsp;·&nbsp;
+    <a href="/search">回到搜索界面 →</a>
+  </p>
+</div>
+
+<script>
+// 独立的用户管理页（不动主界面）。只做一件事：列用户 + 审批/停用/角色/改密。
+// 写操作要带 X-EG2-CSRF（值来自 /api/auth/status，只有会话本人拿得到）。
+const $ = (s) => document.querySelector(s);
+let csrf = '';
+let me = null;
+
+function say(text, cls) {
+  const m = $('#msg');
+  m.className = 'msg ' + (cls || '');
+  m.textContent = text || '';
+}
+
+async function api(path, body) {
+  const opt = { credentials: 'same-origin' };
+  if (body !== undefined) {
+    opt.method = 'POST';
+    opt.headers = { 'Content-Type': 'application/json', 'X-EG2-CSRF': csrf };
+    opt.body = JSON.stringify(body);
+  }
+  const r = await fetch(path, opt);
+  let j = {};
+  try { j = await r.json(); } catch (e) { /* 忽略 */ }
+  if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+  return j;
+}
+
+function fmt(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+    + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+function tag(state) {
+  const label = { active: '已启用', pending: '待审批', disabled: '已停用' }[state] || state;
+  return '<span class="tag t-' + state + '">' + label + '</span>';
+}
+
+function row(u) {
+  const acts = [];
+  if (u.state !== 'active') acts.push(['state', 'active', '审批通过 / 启用', 'primary']);
+  if (u.state === 'active') acts.push(['state', 'disabled', '停用', '']);
+  acts.push(['role', u.role === 'admin' ? 'user' : 'admin',
+             u.role === 'admin' ? '降为普通用户' : '设为管理员', '']);
+  acts.push(['password', '', '重置密码', '']);
+  const btns = acts.map(([kind, val, label, cls]) =>
+    '<button class="' + cls + '" data-id="' + u.id + '" data-kind="' + kind
+    + '" data-val="' + val + '">' + label + '</button>').join('');
+  return '<tr class="' + u.state + '"><td>' + u.id + '</td><td><b>' + u.name + '</b>'
+    + (me && u.id === me.id ? ' <span class="hint">（我）</span>' : '')
+    + '</td><td>' + (u.role === 'admin' ? '管理员' : '普通用户') + '</td><td>'
+    + tag(u.state) + '</td><td class="hint">' + fmt(u.last_login) + '</td><td>'
+    + btns + '</td></tr>';
+}
+
+// ---- 我的账号：改名 / 改密码 ----
+function bindMyAccount() {
+  const nameIn = $('#me-name-in');
+  const namePwd = $('#me-name-pwd');
+  const nameGo = $('#me-name-go');
+  const nameMsg = $('#me-name-msg');
+  if (nameGo) {
+    nameGo.addEventListener('click', async () => {
+      const name = (nameIn.value || '').trim();
+      const pwd = namePwd.value || '';
+      if (!name) { nameMsg.textContent = '用户名不能空'; return; }
+      if (!pwd) { nameMsg.textContent = '要填当前密码'; return; }
+      nameGo.disabled = true;
+      nameMsg.textContent = '提交中…';
+      try {
+        const d = await api('/api/auth/me/name', { name, pwd });
+        nameMsg.textContent = '已改成「' + d.user.name + '」✓（下次登录用新名字）';
+        nameIn.value = '';
+        namePwd.value = '';
+        say('用户名已更新 ✓', 'ok');
+        await load();
+      } catch (e) {
+        nameMsg.textContent = '失败：' + e.message;
+      } finally {
+        nameGo.disabled = false;
+      }
+    });
+  }
+
+  const pwdOld = $('#me-pwd-old');
+  const pwdNew = $('#me-pwd-new');
+  const pwdGo = $('#me-pwd-go');
+  const pwdMsg = $('#me-pwd-msg');
+  if (pwdGo) {
+    pwdGo.addEventListener('click', async () => {
+      const old = pwdOld.value || '';
+      const np = pwdNew.value || '';
+      if (!old) { pwdMsg.textContent = '要填旧密码'; return; }
+      if (np.length < 6) { pwdMsg.textContent = '新密码至少 6 位'; return; }
+      pwdGo.disabled = true;
+      pwdMsg.textContent = '提交中…';
+      try {
+        const d = await api('/api/auth/me/password', { old, new: np });
+        pwdMsg.textContent = (d.note || '密码已更新 ✓');
+        pwdOld.value = '';
+        pwdNew.value = '';
+        say('密码已更新 ✓', 'ok');
+      } catch (e) {
+        pwdMsg.textContent = '失败：' + e.message;
+      } finally {
+        pwdGo.disabled = false;
+      }
+    });
+  }
+}
+
+// ---- 注册开关 ----
+async function loadRegSwitch() {
+  const sw = $('#reg-sw');
+  const st = $('#reg-state');
+  if (!sw) return;
+  try {
+    const d = await api('/api/auth/settings');
+    sw.checked = !!d.allow_register;
+    if (st) st.textContent = d.allow_register ? '允许自助注册' : '仅管理员可开号';
+  } catch (e) {
+    if (st) st.textContent = '读不到（' + e.message + '）';
+  }
+}
+
+function bindRegSwitch() {
+  const sw = $('#reg-sw');
+  if (!sw) return;
+  sw.addEventListener('change', async () => {
+    sw.disabled = true;
+    try {
+      const d = await api('/api/auth/settings', { allow_register: sw.checked });
+      const st = $('#reg-state');
+      if (st) st.textContent = d.allow_register ? '允许自助注册' : '仅管理员可开号';
+      say(sw.checked ? '已允许自助注册（注册后仍需审批）✓'
+                     : '已关闭自助注册 ✓', 'ok');
+    } catch (e) {
+      sw.checked = !sw.checked;         // 失败就还原
+      say('切换失败：' + e.message, 'bad');
+    } finally {
+      sw.disabled = false;
+    }
+  });
+}
+
+// ---- 新建用户 ----
+function bindNewUser() {
+  const go = $('#nu-go');
+  if (!go) return;
+  go.addEventListener('click', async () => {
+    const name = ($('#nu-name') || {}).value || '';
+    const pwd = ($('#nu-pwd') || {}).value || '';
+    const role = ($('#nu-role') || {}).value || 'user';
+    const state = ($('#nu-state') || {}).value || 'active';
+    const msg = $('#nu-msg');
+    if (!name.trim()) { if (msg) msg.textContent = '用户名不能空'; return; }
+    if (pwd.length < 6) { if (msg) msg.textContent = '密码至少 6 位'; return; }
+    go.disabled = true;
+    if (msg) msg.textContent = '创建中…';
+    try {
+      const d = await api('/api/auth/users', { name: name.trim(), pwd, role, state });
+      if (msg) msg.textContent = '已创建「' + d.user.name + '」✓';
+      $('#nu-name').value = '';
+      $('#nu-pwd').value = '';
+      say('已新建用户「' + d.user.name + '」✓', 'ok');
+      await load();
+    } catch (e) {
+      if (msg) msg.textContent = '失败：' + e.message;
+      say('新建失败：' + e.message, 'bad');
+    } finally {
+      go.disabled = false;
+    }
+  });
+}
+
+async function load() {
+  const st = await api('/api/auth/status');
+  csrf = st.csrf || '';
+  me = st.user;
+  if (!me) { location.href = '/static/login.html'; return; }
+  $('#who').textContent = '当前登录：' + me.name
+    + (me.role === 'admin' ? '（管理员）' : '');
+  // 普通用户看不到"注册开关"和"新建用户"（那两块包在 admin-only 容器里）
+  document.querySelectorAll('.admin-only').forEach((el) => {
+    el.style.display = (me.role === 'admin') ? '' : 'none';
+  });
+  if (me.role !== 'admin') {
+    $('#rows').innerHTML = '<tr><td colspan="6" class="bad">'
+      + '只有管理员能管理用户。请联系管理员，或回到搜索界面。</td></tr>';
+    return;
+  }
+  bindMyAccount();                // 我的账号（所有人）
+  await loadRegSwitch();          // 读注册开关
+  bindRegSwitch();
+  bindNewUser();
+  const d = await api('/api/auth/users');
+  $('#rows').innerHTML = d.users.map(row).join('');
+  bind();
+}
+
+function bind() {
+  document.querySelectorAll('#rows button').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const id = b.dataset.id;
+      const kind = b.dataset.kind;
+      b.disabled = true;
+      try {
+        if (kind === 'state') {
+          await api('/api/auth/users/' + id + '/state', { state: b.dataset.val });
+          say('已更新状态 ✓', 'ok');
+        } else if (kind === 'role') {
+          await api('/api/auth/users/' + id + '/role', { role: b.dataset.val });
+          say('已更新角色 ✓', 'ok');
+        } else {
+          const pwd = prompt('给这个用户设置新密码（至少 6 位）');
+          if (!pwd) { b.disabled = false; return; }
+          await api('/api/auth/users/' + id + '/password', { pwd: pwd });
+          say('密码已重置 ✓', 'ok');
+        }
+        await load();
+      } catch (e) {
+        say('失败：' + e.message, 'bad');
+        b.disabled = false;
+      }
+    });
+  });
+}
+
+load().catch((e) => say('读取失败：' + e.message, 'bad'));
+</script>
+</body>
+</html>

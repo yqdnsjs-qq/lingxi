@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" sizes="64x64" href="/static/favicon.png?v=20261022a"><link rel="shortcut icon" href="/static/favicon.png?v=20261022a"><link rel="apple-touch-icon" href="/static/logo-128.png?v=20261022a">
+<title>宇之语 · 灵犀 — 共享设置</title>
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--panel2:#1c232d;--fg:#e7ecf5;--muted:#93a1b8;
+        --line:#2a3340;--accent:#5b9dff;--ok:#3ddc97;--warn:#ffb454;--bad:#ff8f8f}
+  *{box-sizing:border-box}
+  body{margin:0;padding:26px 18px;background:var(--bg);color:var(--fg);
+       font:15px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  .wrap{max-width:1060px;margin:0 auto}
+  h1{font-size:19px;margin:0 0 6px}
+  .hint{color:var(--muted);font-size:13px}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14px}
+  th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:500;font-size:13px}
+  code{background:var(--panel2);padding:1px 5px;border-radius:5px;font-size:12.5px}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+  .seg button{margin:0;border:0;border-radius:0;padding:5px 12px;background:transparent;
+              color:var(--muted);font-size:13.5px;cursor:pointer}
+  .seg button.on-share{background:rgba(61,220,151,.16);color:var(--ok);font-weight:600}
+  .seg button.on-priv{background:rgba(255,143,143,.14);color:var(--bad);font-weight:600}
+  .msg{margin:10px 0;min-height:22px}
+  .ok{color:var(--ok)} .bad{color:var(--bad)}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div style="margin:0 0 14px">
+    <a href="/search" style="display:inline-block;padding:7px 14px;border-radius:9px;
+       border:1px solid var(--line);color:var(--fg);text-decoration:none;
+       background:var(--panel2);font-size:14px">← 返回搜索界面</a>
+    <span class="hint" style="margin-left:10px">（本机如果是独立窗口打开，用这个按钮回去）</span>
+  </div>
+  <h1>共享设置 <span class="hint" id="who"></span>
+    <span class="hint" id="hint-scope"></span></h1>
+  <div class="hint">
+    <b>共享</b> = 所有登录用户都能搜到、问答能引用；<b>私有</b> = 只有归属人能看到。<br>
+    点「👥 指定人」可以<b>只共享给某几个人</b> —— 别人看得到、搜得到，
+    但改不了也删不了 ✓ 改完立刻生效，不用重建索引。
+  </div>
+  <div class="msg" id="msg"></div>
+  <table>
+    <thead><tr>
+      <th style="width:44px">#</th><th>文件夹</th><th style="width:70px">文件数</th>
+      <th style="width:180px">共享给</th><th style="width:180px">共享 / 私有</th>
+      <th style="width:110px">指定人</th>
+    </tr></thead>
+    <tbody id="rows"><tr><td colspan="5" class="hint">正在读取…</td></tr></tbody>
+  </table>
+  <p class="hint">归属人：<code>共享库</code> = 管理员统一维护的公共库</p>
+
+  <!-- 👥 指定共享人（2026-10-21） -->
+  <div id="shares-dlg" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.62);
+       z-index:60;align-items:center;justify-content:center">
+    <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;
+         width:min(560px,94vw);max-height:84vh;display:flex;flex-direction:column;
+         padding:16px 18px;gap:12px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <b>共享给谁</b>
+        <span class="hint" id="shares-path" style="flex:1;overflow:hidden;
+              text-overflow:ellipsis;white-space:nowrap"></span>
+        <button id="shares-close" style="padding:4px 12px;border-radius:8px;
+                border:1px solid var(--line);background:var(--panel2);color:var(--fg);
+                cursor:pointer">关闭</button>
+      </div>
+      <div class="hint" style="line-height:1.8">
+        勾上的人<b>能搜到、能问答引用、能预览</b>，但<b>不能删也不能改</b> ✓<br>
+        想让所有人都能看，就用表格里的「共享」；这里管的是<b>只给哪几个人</b>。
+      </div>
+      <div id="shares-users" style="max-height:300px;overflow-y:auto;
+           border:1px solid var(--line);border-radius:8px;padding:6px 10px"></div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span class="hint" id="shares-msg"></span>
+        <span style="flex:1"></span>
+        <button id="shares-save" style="padding:6px 16px;border-radius:8px;border:1px solid var(--line);
+                background:var(--accent);color:#08111f;font-weight:600;cursor:pointer">保存</button>
+      </div>
+    </div>
+  </div>
+  <p><a href="/search">← 回到搜索界面</a> &nbsp; <a href="/static/users.html">用户管理 →</a></p>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let csrf = '';
+
+function say(t, cls) { const m = $('#msg'); m.className = 'msg ' + (cls || ''); m.textContent = t || ''; }
+
+async function api(path, body, method) {
+  const opt = { credentials: 'same-origin' };
+  if (body !== undefined) {
+    opt.method = method || 'POST';
+    opt.headers = { 'Content-Type': 'application/json', 'X-EG2-CSRF': csrf };
+    opt.body = JSON.stringify(body);
+  }
+  const r = await fetch(path, opt);
+  let j = {};
+  try { j = await r.json(); } catch (e) {}
+  if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+  return j;
+}
+
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+function row(f) {
+  const shared = f.visibility !== 'private';
+  return '<tr><td>' + f.id + '</td>'
+    + '<td><code>' + esc(f.path) + '</code><div class="hint">'
+    + (f.owner_name ? ('归属：' + esc(f.owner_name)) : '归属：共享库') + '</div></td>'
+    + '<td>' + (f.files || 0) + '</td>'
+    + '<td class="hint">' + esc(f.readable_by) + '</td>'
+    + '<td><span class="seg">'
+    + '<button data-id="' + f.id + '" data-vis="shared" class="' + (shared ? 'on-share' : '') + '">共享</button>'
+    + '<button data-id="' + f.id + '" data-vis="private" class="' + (shared ? '' : 'on-priv') + '">私有</button>'
+    + '</span></td>'
+    + '<td><button class="ghost" data-shares="' + f.id + '" data-path="'
+    + esc(f.path) + '" style="padding:4px 10px;border-radius:8px;border:1px solid var(--line);'
+    + 'background:var(--panel2);color:var(--fg);cursor:pointer;font-size:13px">'
+    + '👥 指定人</button></td></tr>';
+}
+
+async function load() {
+  const st = await api('/api/auth/status');
+  csrf = st.csrf || '';
+  if (!st.user) { location.href = '/static/login.html'; return; }
+  $('#who').textContent = '当前登录：' + st.user.name
+    + (st.user.role === 'admin' ? '（管理员）' : '');
+  const isAdmin = st.user.role === 'admin';
+  // ★ 2026-10-21：普通用户也能改**自己**的文件夹（后端 _need_folder_write 本来就允许）
+  //   管理员看全部，普通用户只看自己的 ✓
+  $('#hint-scope').textContent = isAdmin
+    ? '（管理员：下面列出全站文件夹）'
+    : '（只列你自己的文件夹）';
+  // 服务器上现在改也会**并集合并写回两边**了（P4 双向同步已上线 ✓），
+  // 所以这里只做"友好提示"，不再是"改了会被覆盖"的警告 ✗→✓
+  // （2026-10-16 第七项收尾：原来的橙色警告已经过期，放宽成中性提示）
+  try {
+    const sc = await api('/api/admin/sync-check');
+    if (sc && sc.can_run_here === false) {
+      const box = document.createElement('div');
+      box.style.cssText = 'margin:0 0 14px;padding:10px 12px;border-radius:9px;'
+        + 'border:1px solid var(--line,#2a3340);background:rgba(120,160,220,.10);'
+        + 'color:var(--fg,#e7ecf5);font-size:13.5px;line-height:1.7';
+      box.innerHTML = '<b>这里是服务器</b><br>'
+        + '在这台机器上改「共享 / 私有」也可以 ✓ —— 同步时两边会'
+        + '<b>按更新时间取新的</b>并写回两边（平手时取更严的"私有"）。<br>'
+        + '只有一点要注意：<b>索引</b>是以建库那台机器为准的，'
+        + '所以「更新索引 / 重建索引」在服务器上是灰的。';
+      document.querySelector('.wrap').insertBefore(box, document.querySelector('table'));
+    }
+  } catch (e) { /* 拿不到就不提示，不挡用 */ }
+  // 管理员：/api/admin/folders（全部）；普通用户：/api/my/data（自己的）
+  let list = [];
+  if (isAdmin) {
+    const d = await api('/api/admin/folders');
+    list = d.folders || [];
+  } else {
+    const d = await api('/api/my/data');
+    list = (d.items || []).map((x) => ({
+      id: x.id, path: x.path, visibility: x.visibility,
+      files: x.n_files, owner_name: st.user.name,
+      readable_by: (x.visibility === 'shared' ? '所有登录用户' : '只自己/被指定的人'),
+    }));
+  }
+  $('#rows').innerHTML = list.length
+    ? list.map(row).join('')
+    : '<tr><td colspan="6" class="hint">你名下还没有文件夹。</td></tr>';
+  // 从「我的数据」跳过来时带 #f<id>，把那一行标亮（省得自己找）✓
+  const m = String(location.hash || '').match(/^#f(\d+)$/);
+  if (m) {
+    const tr = document.querySelector('#rows tr td:first-child');
+    document.querySelectorAll('#rows tr').forEach((r) => {
+      const first = r.querySelector('td');
+      if (first && first.textContent.trim() === m[1]) {
+        r.style.background = 'rgba(91,157,255,.12)';
+        r.scrollIntoView({ block: 'center' });
+      }
+    });
+    void tr;
+  }
+  document.querySelectorAll('#rows [data-shares]').forEach((b) => {
+    b.addEventListener('click', () => openShares(b.dataset.shares, b.dataset.path));
+  });
+  document.querySelectorAll('#rows [data-vis]').forEach((b) => {
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        // 统一走 /api/folders/{id}/shares —— 普通用户对自己的文件夹也有权限 ✓
+        // （以前用 /api/admin/folders/{id}/visibility，非管理员会被 403 ✗）
+        await api('/api/folders/' + b.dataset.id + '/shares',
+                  { visibility: b.dataset.vis }, 'PUT');
+        say((b.dataset.vis === 'shared' ? '已设为全站共享' : '已设为私有')
+            + ' ✓ 立刻生效，不用重建索引', 'ok');
+        await load();
+      } catch (e) {
+        say('失败：' + e.message, 'bad');
+        b.disabled = false;
+      }
+    });
+  });
+}
+
+let shareFid = 0;
+
+async function openShares(fid, path) {
+  shareFid = Number(fid);
+  const dlg = $('#shares-dlg');
+  $('#shares-path').textContent = path || ('#' + fid);
+  $('#shares-msg').textContent = '';
+  $('#shares-users').innerHTML = '<div class="hint">正在读取…</div>';
+  dlg.style.display = 'flex';
+  try {
+    const d = await api('/api/folders/' + fid + '/shares');
+    const granted = new Set(d.granted || []);
+    const me = (d.owner_id || 0);
+    const users = (d.users || []).filter((u) => u.id !== me);
+    if (!users.length) {
+      $('#shares-users').innerHTML = '<div class="hint">还没有别的账号可分享。</div>';
+      return;
+    }
+    $('#shares-users').innerHTML = users.map((u) =>
+      '<label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:14px">'
+      + '<input type="checkbox" data-su="' + u.id + '"'
+      + (granted.has(u.id) ? ' checked' : '') + '>'
+      + '<span>' + esc(u.name) + '</span>'
+      + '<span class="hint">' + (u.role === 'admin' ? '管理员' : '成员') + '</span></label>'
+    ).join('');
+  } catch (e) {
+    $('#shares-users').innerHTML = '<div class="bad">读不到：' + esc(e.message) + '</div>';
+  }
+}
+
+$('#shares-close').addEventListener('click', () => { $('#shares-dlg').style.display = 'none'; });
+$('#shares-save').addEventListener('click', async () => {
+  const ids = Array.from(document.querySelectorAll('#shares-users [data-su]:checked'))
+    .map((el) => Number(el.dataset.su));
+  $('#shares-msg').textContent = '保存中…';
+  try {
+    await api('/api/folders/' + shareFid + '/shares', { user_ids: ids }, 'PUT');
+    $('#shares-msg').textContent = ids.length
+      ? ('已共享给 ' + ids.length + ' 个人 ✓')
+      : '已改成只给自己 ✓';
+    await load();
+  } catch (e) {
+    $('#shares-msg').textContent = '失败：' + e.message;
+  }
+});
+
+load().catch((e) => say('读取失败：' + e.message, 'bad'));
+</script>
+</body>
+</html>

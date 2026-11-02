@@ -1,0 +1,66 @@
+# ================= 灵犀 · GitHub 仓库忽略清单 =================
+# 原则：仓库里只放代码。数据、模型、运行环境、密钥、日志，一律不提交。
+
+# ---------- 1. 你的数据（绝对不提交）----------
+data/
+backups/
+face-lab/
+output/
+dist/
+release/*.zip
+损坏文件清单.*
+
+# ---------- 2. 运行环境 / 模型 / 缓存 ----------
+venv/
+models/
+.cache/
+.browser/
+**/node_modules/
+run/.npm-cache/
+run/domtest/
+build/
+.venv/
+
+# ---------- 3. 日志和临时文件 ----------
+logs/
+*.log
+debug.log
+*.tmp
+*.bak
+*.bak-*
+
+# ---------- 4. 配置与密钥（最容易出事的一类）----------
+config.ini
+config.ini.bak*
+.env
+run/deploy/keys/
+run/.pii_map.json
+run/deploy/askpass.cmd
+*.pem
+*.key
+**/known_hosts
+run/deploy/_local_db_backup*.db
+run/deploy/_*.tgz
+*.db
+*.db-wal
+*.db-shm
+
+# ---------- 5. run/ 只提交运行必需的那一小撮 ----------
+# 其余三百多个是开发期脚本（探测 / 压测 / 截图），带内网地址，不适合放公开仓库
+/run/*
+!/run/restart_server.py
+!/run/snapshot.py
+!/run/ui_window.py
+!/run/git_update.bat
+!/run/git_publish.py
+!/run/ocr_bridges/
+/run/deploy/*
+!/run/deploy/*.py
+!/run/deploy/*.sh
+!/run/deploy/*.md
+!/run/deploy/lingxi.service
+
+# ---------- 6. Python 缓存 ----------
+__pycache__/
+*.py[cod]
+.pytest_cache/

@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<link rel="icon" type="image/png" sizes="64x64" href="/static/favicon.png?v=20261022a"><link rel="shortcut icon" href="/static/favicon.png?v=20261022a"><link rel="apple-touch-icon" href="/static/logo-128.png?v=20261022a">
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>宇之语 · 灵犀 · 本地文件与知识中枢</title>
+
+<link rel="stylesheet" href="/static/app.e15c143a3e2f.css">
+</head>
+<body>
+<div id="eg2-errbar" style="display:none;position:fixed;left:0;right:0;bottom:0;z-index:99999;background:#5a1f1f;color:#ffd9d9;padding:9px 14px;font:12.5px/1.6 Consolas,monospace;max-height:38vh;overflow:auto;border-top:2px solid #ff8f8f"><b>页面出错了（把下面这段发给开发者就能定位）</b><button id="eg2-errclose" style="float:right;background:#7a2c2c;color:#fff;border:0;border-radius:6px;padding:2px 10px;cursor:pointer">关闭</button><div id="eg2-errbody" style="margin-top:6px;white-space:pre-wrap"></div></div>
+
+<!-- 服务已停止时的全屏提示（默认隐藏） -->
+<div id="dead-ov" style="display:none;position:fixed;inset:0;z-index:9999;
+     background:rgba(10,14,22,.94);color:var(--fg);
+     align-items:center;justify-content:center;text-align:center">
+  <div style="max-width:460px;padding:28px">
+    <div style="font-size:44px;margin-bottom:14px">&#9209;</div>
+    <div id="dead-title" style="font-size:20px;font-weight:700;margin-bottom:10px">
+      服务暂时连不上（正在重启？）</div>
+    <div class="hint" id="dead-desc" style="line-height:1.9;margin-bottom:20px">
+      会自动重试，服务回来这个提示会自己消失 ✓<br>
+      <span style="opacity:.6">如果一直连不上，再双击 <b>search.bat</b> 重新启动。</span>
+    </div>
+    <button id="dead-close" style="font-size:15px;padding:9px 22px">
+      立即重试</button>
+    <div class="hint" style="margin-top:14px;opacity:.55">
+      如果按钮没反应，浏览器不允许脚本关标签页，手动关掉即可（Ctrl+W）
+    </div>
+  </div>
+</div>
+<header>
+  <h1 style="display:flex;align-items:center;gap:10px;margin:0"><img src="/static/logo-128.png" alt="" style="width:34px;height:34px;object-fit:contain"><span style="display:flex;flex-direction:column;line-height:1.15"><span style="font-size:19px;font-weight:700">宇之语 · 灵犀</span><span style="font-size:11.5px;font-weight:400;opacity:.62;letter-spacing:.3px">本地文件与知识中枢</span></span></h1>
+  <span id="status" class="badge">连接中…</span>
+  <span id="stat-badge" class="badge"></span>
+  <span id="desktop-warn" class="badge err" hidden></span>
+  <span style="flex:1"></span>
+  <span class="hdr-links">
+    <a href="/" style="color:var(--accent)">嵌入测试页</a>
+    <a href="/docs" target="_blank" style="color:var(--accent)">API 文档</a>
+  </span>
+  <!-- ★ 2026-10-23 项目主："界面上要标出版本号，不然分不清要不要升级" -->
+  <a id="ver-chip" class="verchip" href="#" title="版本号（点一下看 build 时间）">v…</a>
+  <!-- 用户牌固定挂在这里（原来用 position:fixed 浮在右上角，会压住上面两个链接 ✗ 2026-10-22 改） -->
+  <div id="eg2-user-slot" class="hdr-user"></div>
+</header>
+  <nav class="tabbar" id="tabbar">
+    <button data-tab="chat2">💬 聊天</button>
+    <button data-tab="search" class="on">🔍 搜索</button>
+    <button data-tab="kb">📚 知识库</button>
+    <button data-tab="folders">📁 文件夹</button>
+    <button data-tab="settings">⚙ 设置</button>
+  </nav>
+
+
+<main>
+  <!-- 索引进度 -->
+  <section class="tabpane" data-pane="search">
+  <div class="card" id="progress-card" data-view="personal admin">
+    <h2>索引状态</h2>
+    <div id="progress-text" class="hint"></div>
+    <div class="bar"><div id="progress-bar"></div></div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <span id="progress-detail" class="hint"></span>
+      <span style="flex:1"></span>
+      <button class="ghost tiny" id="start-index"
+              title="开始（或继续）索引：已经建好的部分会跳过，不会重做">▶ 开始索引</button>
+      <button class="ghost tiny" id="cancel-index"
+              title="暂停当前索引：已建好的部分会保留，点「开始索引」接着跑">⏸ 暂停</button>
+    </div>
+  </div>
+
+  <!-- 搜索 -->
+  <div class="card">
+    <div class="searchbar">
+      <input type="text" id="q" placeholder="用自然语言描述你要找的文件，例如：去年的报销发票 / 关于极光的资料 / 蓝色圆形的产品图" autocomplete="off">
+      <select id="topk">
+        <option value="20">20 条</option>
+        <option value="30" selected>30 条</option>
+        <option value="50">50 条</option>
+        <option value="100">100 条</option>
+      </select>
+      <button id="go">搜索</button>
+    </div>
+    <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <select id="folder-filter"><option value="">全部文件夹</option></select>
+      <select id="quick-person" title="按人物筛选（可多选）">
+        <option value="">＋ 按人物筛选</option>
+      </select>
+      <span id="picked-chips" style="display:flex;gap:6px;flex-wrap:wrap"></span>
+      <select id="ext-filter">
+        <option value="">全部类型</option>
+        <option value=".pdf">PDF</option>
+        <option value=".docx,.doc">Word</option>
+        <option value=".xlsx,.xls,.csv">Excel / CSV</option>
+        <option value=".pptx,.ppt">PPT</option>
+        <option value=".txt,.md">文本 / Markdown</option>
+        <option value=".py,.js,.ts,.java,.c,.cpp,.cs,.go,.rs,.sql">代码</option>
+        <option value=".jpg,.jpeg,.png,.gif,.webp,.bmp">图片</option>
+        <option value=".mp3,.wav,.flac,.m4a">音频</option>
+        <option value=".mp4,.mkv,.avi,.mov">视频</option>
+      </select>
+      <span id="search-info" class="hint"></span>
+    </div>
+  </div>
+
+  <!-- 结果 -->
+  <div id="results"></div>
+  </section>
+
+  <!-- 知识库问答 -->
+
+  <section class="tabpane" data-pane="kb">
+  <div class="card" id="kb-card">
+    <h2>知识库问答 <span class="hint" id="kb-status">检查中…</span></h2>
+    <div class="toolrow">
+      <input id="kb-q" placeholder="就你标了「知识库」的文件夹提问，例如：报销上限是多少？"
+             style="flex:1;min-width:260px">
+      <button id="kb-ask">提问</button>
+    </div>
+    <div class="toolrow">
+      <label class="ghost tiny" style="cursor:pointer;padding:6px 10px">📎 附图<input type="file" id="kb-img" accept="image/*" multiple hidden></label>
+      <!-- ★ 2026-10-22 项目主："把 Dify 也接进「知识库问答」页，加一个选择开关" -->
+      <label class="hint" style="display:flex;align-items:center;gap:6px;cursor:pointer;
+             user-select:none;padding:5px 10px;border:1px solid var(--line);border-radius:999px">
+        <input type="checkbox" id="kb-dify" style="cursor:pointer">
+        ☁ Dify 一起查
+      </label>
+      <span style="flex:1"></span>
+      <span class="hint">回答用</span>
+      <select id="kb-model" title="选哪个模型回答：本机模型 或 外部 API（两套配置见「设置 → 外部模型」）"></select>
+      <button class="ghost" id="kb-unload" title="把本机对话模型从显卡/内存上摘下来腾地方">卸下本机模型</button>
+    </div>
+    <div class="hint" style="margin-top:8px">
+      默认只检索被标为「知识库」的文件夹；勾上 <b>☁ Dify 一起查</b>，就把你在
+      「设置 → 模型与系统设置 → ☁ Dify 知识库」里接的库<b>一起检索</b> ✓<br>
+      回答里 <b>[1] [2]</b> 是本项目知识库的片段，<b>[D1] [D2]</b> 是 Dify 的片段，两套编号各自独立。
+    </div>
+    <div id="kb-guide" class="hint" style="margin:10px 0"></div>
+    <div id="kb-imgs" style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0"></div>
+    <div id="kb-answer"></div>
+  </div>
+
+
+  </section>
+
+  <section class="tabpane" data-pane="chat2">
+  <div class="card" id="chat2-card">
+    <h2>💬 聊天 <span class="hint" id="chat2-status"></span></h2>
+    <div style="display:flex;gap:12px;min-height:460px">
+      <!-- 左：会话列表 -->
+      <div style="width:210px;flex:0 0 210px;display:flex;flex-direction:column;
+                  border-right:1px solid var(--line);padding-right:10px">
+        <button id="chat2-new" style="margin-bottom:8px">＋ 新对话</button>
+        <div id="chat2-convs" style="flex:1;overflow:auto;display:flex;
+             flex-direction:column;gap:4px"></div>
+      </div>
+      <!-- 右：消息 + 输入 -->
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div id="chat2-msgs" style="flex:1;overflow:auto;display:flex;
+             flex-direction:column;gap:10px;padding:4px 2px"></div>
+        <div id="chat2-atts" style="display:none;flex-wrap:wrap;gap:8px;
+             margin-bottom:8px"></div>
+        <div style="display:flex;gap:8px">
+          <button id="chat2-att" class="ghost" title="上传图片或文件"
+                  style="align-self:flex-end;font-size:17px;padding:6px 10px">📎</button>
+          <input type="file" id="chat2-file" multiple style="display:none"
+                 accept="image/*,.pdf,.txt,.md,.docx,.xlsx,.csv,.json">
+          <textarea id="chat2-input" rows="2" placeholder="说点什么…（Enter 发送，Shift+Enter 换行）"
+                    style="flex:1;resize:vertical;padding:9px 11px;border-radius:10px;
+                           border:1px solid var(--line);background:var(--panel2);
+                           color:var(--fg);font:inherit"></textarea>
+          <button id="chat2-send" style="align-self:flex-end">发送</button>
+        </div>
+        <!-- ★ 开关放输入框下面：项目主要"更明显"（原来藏在标题右边） -->
+        <div id="chat2-opts" style="display:flex;gap:14px;align-items:center;
+             margin-top:8px;padding:8px 11px;border-radius:10px;
+             background:var(--panel2);border:1px solid var(--line);flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:6px;font-size:12.5px">
+            🤖 模型
+            <select id="chat2-model" title="用哪个模型回答：本机已部署的，或你配的 API"
+                    style="padding:3px 6px;border-radius:6px;border:1px solid var(--line);
+                           background:var(--panel2);color:var(--fg);max-width:260px">
+              <option value="">默认（设置里的那套）</option>
+            </select>
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;
+                        font-size:12.5px;user-select:none">
+            <input type="checkbox" id="chat2-web" style="cursor:pointer">
+            🌐 联网搜索
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;
+                        font-size:12.5px;user-select:none">
+            <input type="checkbox" id="chat2-dify" style="cursor:pointer">
+            ☁ Dify
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;
+                        font-size:12.5px;user-select:none">
+            <input type="checkbox" id="chat2-kb" style="cursor:pointer">
+            📚 接知识库
+          </label>
+          <button class="ghost tiny" id="chat2-export" title="把这个对话导出成文件">
+            ⬇ 导出
+          </button>
+          <span class="hint" id="chat2-tip" style="margin-left:auto"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="tabpane" data-pane="folders">
+  <!-- 文件夹页（2026-10-22 项目主定的主标签：聊天 / 搜索 / 知识库 / 文件夹 / 设置）。
+       人物已经挪到「设置 → 人物命名」；这里只管建库、索引与统计。 -->
+  <!-- 文件夹 -->
+  <div class="card">
+    <h2>已索引的文件夹（每个文件夹可以有自己的模式）</h2>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <button id="add-folder" title="建库前建议先确认「上传到服务器」卡片里的服务器维度——两边维度一致，上传后才能合并搜索和问答 ✓">＋ 添加文件夹（可多选）</button>
+      <button class="ghost" id="reindex">增量更新全部</button>
+      <button class="ghost" id="rebuild">全部重建索引</button>
+      <!-- ★ 2026-10-27 项目主："NAS 重启滞后 → 显示目录不存在"：
+           立刻重查（不用等 30 秒轮询）；服务器上管理员还能直接重启服务 -->
+      <button class="ghost" id="folders-recheck"
+              title="立刻重新检查每个文件夹在不在、网络盘挂载还在不在（不用等 30 秒轮询）">🔄 重新检查目录</button>
+      <button class="ghost" id="svc-restart" data-view="admin"
+              title="重启灵犀服务（约 25~40 秒）。网络盘（NAS）重启后句柄失效时，用这个最干脆">♻ 重启服务</button>
+      <span id="recheck-note" class="hint"></span>
+      <span style="flex:1"></span>
+      <label class="hint">分组</label>
+      <select id="group-by" title="按路径分组（原来的样子）或按用途归类分组">
+        <option value="path">按路径（文件夹位置）</option>
+        <option value="category">按归类（用途类别）</option>
+      </select>
+      <button class="ghost tiny" id="cat-settings" title="改这 5 个用途的默认扫描口径，或者自己加类别">⚙ 类别设置</button>
+    </div>
+    <div class="toolbar" id="night-toolbar" style="margin-bottom:8px">
+      <button class="ghost tiny" id="btn-plan"
+              title="📋 只算不做：列出「接下来要干什么」——哪些文件夹、多少张插图待打标、OCR 当前设置。
+不会扫描目录、不调模型、不占显存，秒回 ✓
+白天放完文件点一下，心里有数；夜里再点「全力执行」让它按计划跑。">📋 计划增量更新</button>
+      <button class="ghost tiny" id="btn-night"
+              title="🚀 按计划全力跑（适合关屏幕离开前点）：
+① 腾显存：把嵌入模型挪到 CPU
+② 按顺序索引（受时限约束）
+③ 插图打标（本地模型会排队，调 API 的并行）
+④ 收尾：停 MinerU 回收显存 → 把嵌入模型挪回显卡
+可以设时限（到点**优雅暂停**，进度保留，下次接着跑）✓">🚀 全力执行</button>
+      <button class="ghost tiny" id="btn-ocr-cfg"
+              title="OCR 引擎、页数上限、插图打标上限 —— 都在这里改，不用动 config.ini ✓
+改完立刻生效（不用重启）">⚙ OCR 设置</button>
+      <span id="night-note" class="hint"></span>
+      <span style="flex:1"></span>
+      <span id="gpu-note-folder" class="hint" title="显卡现在被谁占着、有几个在排队（本地 OCR 与本地打标会排队，避免撞显存）"></span>
+    </div>
+    <div class="toolbar" id="bulk-toolbar" style="display:none">
+      <span id="bulk-count" class="hint"></span>
+      <span style="flex:1"></span>
+      <button class="ghost tiny" data-bulk="scan"
+              title="按顺序把这几个文件夹**依次扫完**（一个接一个自动跑，不用守着点下一个）✓
+已经建好的部分会跳过，不会重做">▶ 顺序扫描（选中的全部）</button>
+      <button class="ghost tiny" data-bulk="rebuild"
+              title="把这几个文件夹的索引清掉重做（会重新读所有文件，慢；已打标的图片描述会保留）">重建</button>
+      <button class="ghost tiny" data-bulk="category">批量设归类</button>
+      <button class="ghost tiny" data-bulk="config">批量设模式</button>
+      <button class="ghost tiny danger" data-bulk="remove">批量移除</button>
+      <button class="ghost tiny" data-bulk="clear">取消选择</button>
+    </div>
+    <div class="folders" id="folders"></div>
+    <div class="hint" style="margin-top:9px">
+      添加后会自动扫描并在本机保存索引，以后重新打开程序直接搜索即可。
+      多个文件夹会<strong>逐个</strong>扫描；搜索时<strong>一起</strong>出结果，不同模式、不同向量维度都能混着搜。
+    </div>
+  </div>
+
+  <!-- 默认排除目录（项目主 2026-10-18 要能自己改；2026-10-22 从「检索与索引」组挪到这里，
+       因为它改的就是这一页在扫什么，跟文件夹挨着才看得懂）-->
+  <div class="card" data-view="personal admin">
+    <h2>默认排除目录
+      <span class="hint" id="ig-count"></span>
+    </h2>
+    <div class="hint" style="margin-bottom:8px">
+      这里列出的目录**不参与索引**，也不会出现在「子目录归类」列表里。<br>
+      一行一个（<b>只需写目录名</b>，比如 <code>@Recycle</code> 就能挡住任意层级里的同名目录）。
+      改完点保存，<b>立刻生效</b>，不用重启服务。
+    </div>
+    <textarea id="ig-list" spellcheck="false" rows="8"
+              style="width:100%;background:var(--panel2);border:1px solid var(--line);
+                     color:var(--fg);border-radius:8px;padding:9px 11px;font:inherit;
+                     font-family:ui-monospace,Consolas,monospace;font-size:12.5px"></textarea>
+    <div class="toolbar" style="margin-top:8px">
+      <button id="ig-save">保存</button>
+      <button class="ghost" id="ig-preset">恢复建议清单</button>
+      <button class="ghost" id="ig-reload">重新读取</button>
+      <span class="hint" id="ig-msg"></span>
+    </div>
+    <div class="hint" id="ig-where" style="margin-top:6px"></div>
+  </div>
+
+  <div class="card">
+    <h2>索引统计</h2>
+    <div class="grid" id="stats"></div>
+  </div>
+  </section>
+
+  <section class="tabpane" data-pane="settings">
+  <!-- 设置页按用途分 4 类（2026-10-22 项目主："功能最好归类，不要分散了"；
+       顺序与命名由项目主定：服务器与共享 / 模型与系统设置 / 人物命名 / 备份与恢复）。 -->
+  <div class="subnav" id="set-nav">
+    <button data-grp="server" class="on">🌐 服务器与共享</button>
+    <button data-grp="model">🧠 模型与系统设置</button>
+    <button data-grp="people">👤 人物命名</button>
+    <button data-grp="backup">💾 备份与恢复</button>
+  </div>
+  <div id="set-groups">
+    <section class="grp" data-grp="server"></section>
+    <section class="grp" data-grp="model"></section>
+    <section class="grp" data-grp="people"></section>
+    <section class="grp" data-grp="backup"></section>
+  </div>
+
+  <!-- 👤 人物命名（2026-10-22 项目主：人物从主标签挪进设置，和备份那些同级） -->
+  <div class="card" id="people-card">
+    <h2>人物命名 <span class="hint" id="people-info">检查中…</span></h2>
+    <div class="toolrow">
+      <label class="fbtn">🔍 以图搜人：选一张照片
+        <input type="file" id="face-file" accept="image/*" style="display:none">
+      </label>
+      <select id="person-mode" title="选了人物之后怎么用">
+        <option value="filter">只搜这个人（筛选）</option>
+        <option value="boost">优先这个人（不排除别人）</option>
+      </select>
+      <label class="hint" style="display:flex;align-items:center;gap:5px;margin:0">阈值
+        <input type="number" id="cluster-thr" min="0.50" max="0.95" step="0.01" value="0.75"
+               style="width:68px;padding:3px 6px;border-radius:6px;border:1px solid var(--line);
+                      background:var(--panel2);color:var(--fg)"
+               title="越高越严：组更纯但同一个人可能被拆成几组；越低越松：组更大但容易混人">
+      </label>
+      <!-- 服务器上的普通用户：这个才是真·筛选器（选文件夹只看那里出现过的人物）✓ -->
+      <span class="hint" id="pff-label" style="display:none">筛选文件夹</span>
+      <select id="people-folder-filter" style="display:none"
+              title="只看某个文件夹里出现过的人物；上面的数字也跟着这个范围算">
+        <option value="">全部（我名下）</option>
+      </select>
+      <span style="flex:1"></span>
+      <select id="people-sort" title="人物卡片的排序方式">
+        <option value="faces-desc">排序：脸数 多→少</option>
+        <option value="faces-asc">排序：脸数 少→多</option>
+        <option value="name-asc">排序：名字 A→Z</option>
+        <option value="name-desc">排序：名字 Z→A</option>
+      </select>
+      <button class="ghost" id="people-clear">清除人物筛选</button>
+      <span class="hint" id="face-info"></span>
+    </div>
+    <!-- 维护类动作按"归类、别分散"的要求收进一处，不再和日常筛选挤在一行 -->
+    <details class="more" id="people-more">
+      <summary>维护与补提（重新聚类 / 归类补全 / 同名去重 / 合并相似组 / 补提人脸）</summary>
+      <div class="toolrow">
+        <button class="ghost" id="people-rebuild" title="按上面的阈值把未命名的脸重新聚类（已命名的脸会强制保留）">重新聚类</button>
+        <button class="ghost" id="people-assign" title="按已命名的人脸中心，把没归类的脸逐张归过去">归类补全</button>
+        <button class="ghost" id="people-dedup" title="把所有同名的人物组合并成一组（保留脸最多的）。同名多组会让按人物筛选莫名漏掉一半照片">同名去重</button>
+        <button class="ghost" id="people-merge-similar" title="把「未命名的整组」并进最像的已命名人物。聚类门槛调严后同一个人会被拆成几组，用这个整组并回去，比逐张归类快得多">合并相似组</button>
+        <span class="hint" id="bf-label">补提范围</span>
+        <select id="backfill-folder" title="只补提人脸时，这个操作作用于哪些文件夹">
+          <option value="">全部文件夹</option>
+        </select>
+        <button class="ghost" id="face-backfill" title="给「已索引但没有人脸数据」的图片补提人脸。不重新编码，比全部重建索引快得多">只补提人脸</button>
+        <span class="hint" id="backfill-progress"></span>
+      </div>
+    </details>
+    <div id="face-guess"></div>
+    <div id="people-grid" class="people-grid"></div>
+  </div>
+
+  <!-- ☁ Dify 知识库（每个用户自己的，可多个；和本项目知识库合并检索）-->
+  <div class="card" id="dify-card">
+    <h2>☁ Dify 知识库
+      <span class="hint">接你自己的 Dify 库，聊天时和本项目知识库一起用</span>
+    </h2>
+    <div class="hint" style="margin-bottom:10px">
+      在 Dify 里打开知识库 → 左侧「<b>API</b>」→ 创建或复制 API Key（<code>dataset-</code> 开头）。<br>
+      <b>每个账号各自一份</b>：你填的库<b>默认只有你自己能用</b>，管理员看不到你的，
+      别人的你也不会看到（2026-10-22 项目主："个人连接个人的"）✓
+      <b>要共用</b>：在每个库下面选「所有登录用户」或「指定的人」（填对方登录用户名）✓<br>
+      可以接多个库；聊天页和知识库问答页勾上「☁ Dify」时，会把它们和我的知识库<b>合并检索</b> ✓<br>
+      <b style="color:var(--warn)">填的时候注意两件事</b>：
+      ① 地址<b>只填到端口</b>，比如 <code>http://192.168.1.30:8080</code>，
+      不要带 <code>/v1</code>（带了也能用，会自动去掉）；<br>
+      ② 知识库 ID 是 <b>36 位 UUID</b>（<code>8-4-4-4-12</code> 那种），
+      只复制到一半会一直报 404。
+    </div>
+    <div id="dify-list" style="display:flex;flex-direction:column;gap:8px"></div>
+    <!-- 别人共享给我的库（只列名字和来自谁，永远不含密钥） -->
+    <div id="dify-shared"></div>
+    <div class="toolbar" style="margin-top:10px">
+      <button id="dify-add">＋ 添加一个库</button>
+      <span class="hint" id="dify-msg"></span>
+    </div>
+  </div>
+
+  <!-- 运行模式 / 设置 -->
+  <div class="card" data-view="personal admin"><!-- 运行模式与设置：服务器上的普通用户看不到 -->
+    <h2>运行模式与设置（全局）</h2>
+    <div id="settings"></div>
+  </div>
+
+  <!-- 服务器连接（只在本机显示：告诉本机往哪台服务器同步）-->
+  <div class="card" data-view="personal admin">
+    <h2>服务器连接
+      <span class="hint">本机往哪台服务器同步 / 上传，以及你在这套系统里的身份</span>
+    </h2>
+    <div class="hint" style="margin-bottom:10px">
+      <b>可以填多个地址（逗号分隔）</b>，按顺序探测，第一个通的就用 ✓<br>
+      典型写法：内网优先、外网兜底 —— 在家用内网（快），出门自动走域名：<br>
+      <code style="font-size:12px">http://192.168.1.10:8199, https://lingxi.example.com</code><br>
+      <b style="color:var(--warn)">账号和密码必须填</b>（2026-10-22 项目主要求）：
+      点「保存并验证」时会<b>真的登录一次服务器</b>，登录成功才算连上；
+      密码留空 = 不改已保存的那个。改完立即生效，不用重启。
+    </div>
+    <div class="toolrow">
+      <input id="sync-server" placeholder="http://192.168.1.10:8199, https://你的域名"
+             style="width:420px;padding:6px 9px;border-radius:8px;
+                    border:1px solid var(--line);background:var(--panel);
+                    color:var(--fg);font:13px Consolas,monospace">
+    </div>
+    <div class="toolrow">
+      <input id="sync-user" placeholder="服务器账号（必填，例如 admin）"
+             style="width:200px;padding:6px 9px;border-radius:8px;
+                    border:1px solid var(--line);background:var(--panel);color:var(--fg)">
+      <input id="sync-pass" type="password" autocomplete="new-password"
+             placeholder="服务器密码（必填；已存过可留空=不改）"
+             style="width:250px;padding:6px 9px;border-radius:8px;
+                    border:1px solid var(--line);background:var(--panel);color:var(--fg)">
+      <button id="sync-save" class="primary">保存并验证</button>
+      <span class="hint" id="sync-msg"></span>
+    </div>
+    <div class="hint" id="sync-current" style="margin-top:8px"></div>
+    <!-- 两端身份：本机是什么档、服务器上是谁（项目主 2026-10-22 要求能确认） -->
+    <div class="hint" id="sync-ident" style="margin-top:6px;line-height:1.9"></div>
+  </div>
+
+  <!-- 显存控制 -->
+  <div class="card" data-view="personal admin"><!-- 显存控制：服务器上的普通用户看不到 -->
+    <h2>显存控制
+      <span id="gpu-state" class="badge" style="float:right">读取中…</span>
+    </h2>
+    <div class="hint" style="margin-bottom:10px">
+      要用满显卡跑别的程序（llama.cpp / 27B 模型等）时，
+      把嵌入模型挪到 CPU 腾出约 2.3 GB。搜索仍然可用，只是编码查询慢 1-2 秒。
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <button class="ghost" id="emb-cpu">嵌入模型 → CPU（腾显存）</button>
+      <button class="ghost" id="emb-cuda">嵌入模型 → 显卡（恢复速度）</button>
+      <span class="hint" id="gpu-note"></span>
+    </div>
+  </div>
+
+  <!-- 外部模型 -->
+  <div class="card">
+    <h2>外部模型（Ollama / OpenAI 兼容）</h2>
+    <div class="hint" style="margin-bottom:10px">
+      把打标或问答交给别的机器 / 云端。
+      <b>打标必须是视觉模型</b>（纯文本模型看不到图，会对每张图编同一句话）。
+      <div id="rm-mine-hint" style="display:none;margin-top:6px;padding:7px 10px;
+           border-radius:8px;background:rgba(91,157,255,.10);color:var(--accent)">
+        👤 <b>这是你自己的配置，需要自己填</b>：填好地址和 Key 点保存，只对你自己生效 ✓
+      </div>
+    </div>
+    <!-- 服务端算出来的"你能用的模型"（自己的 + 服务器公用/别人共享的），只读 -->
+    <div id="rm-srvlist"></div>
+    <div id="rm-slotbar" style="margin-bottom:10px"></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+      <input type="text" id="rm-url" placeholder="http://192.168.1.50:11434 或 http://IP:8080/v1"
+             style="flex:1;min-width:260px;padding:6px 10px;border-radius:8px;
+                    border:1px solid var(--line);background:var(--panel2);color:var(--fg)">
+      <button class="ghost" id="rm-probe">探测模型</button>
+    </div>
+
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+      <input type="password" id="rm-key" placeholder="API Key（本地 Ollama/llama.cpp 留空）"
+             style="flex:1;min-width:260px;padding:6px 10px;border-radius:8px;
+                    border:1px solid var(--line);background:var(--panel2);color:var(--fg)">
+      <label class="hint" style="display:flex;align-items:center;gap:5px">
+        <input type="checkbox" id="rm-remember"> 记住密钥
+      </label>
+    </div>
+    <div style="margin-bottom:10px">
+      <div class="hint" style="margin-bottom:4px">
+        自定义请求头（JSON，可留空）。有些网关除了密钥还要额外的头，
+        比如 OpenCode 需要 <code>{"x-opencode-session":"..."}</code>
+      </div>
+      <div style="margin-bottom:4px">
+        <button class="ghost tiny" id="rm-gen-session">生成随机 session 头</button>
+        <span class="hint">OpenCode 要求 <code>x-opencode-session</code>，
+          值随便一个唯一字符串就行（别用示例里的 session_12345）</span>
+      </div>
+      <textarea id="rm-headers" rows="3" placeholder='{"x-opencode-session": "8f3a1c2e-..."}'
+        style="width:100%;padding:8px 10px;border-radius:8px;
+               border:1px solid var(--line);background:var(--panel2);color:var(--fg);
+               font-family:Consolas,monospace;font-size:12.5px"></textarea>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+      <select id="rm-model" style="flex:1;min-width:220px;padding:6px 10px;border-radius:8px;
+              border:1px solid var(--line);background:var(--panel2);color:var(--fg)">
+        <option value="">（先点「探测模型」）</option>
+      </select>
+      <label class="hint" style="display:flex;align-items:center;gap:5px">
+        图片边长
+        <input type="number" id="rm-side" min="224" max="1600" step="64" value="448"
+               style="width:70px;padding:3px 6px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);color:var(--fg)">
+        <span style="opacity:.7">像素（越小越快）</span>
+      </label>
+      <label class="hint" style="display:flex;align-items:center;gap:5px">
+        最多
+        <input type="number" id="rm-tok" min="64" max="2048" step="64" value="800"
+               style="width:64px;padding:3px 6px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);color:var(--fg)">
+        <span style="opacity:.7">tokens</span>
+      </label>
+      <button class="ghost" id="rm-test">拿真图试一张</button>
+    </div>
+    <div class="hint" id="rm-out"></div>
+  </div>
+
+  <!-- 图片打标（VL） -->
+  <div class="card">
+    <h2>图片打标（让插图能被搜到）
+      <span id="vl-state" class="badge" style="float:right">读取中…</span>
+    </h2>
+    <div class="hint" style="margin-bottom:10px">
+      用视觉模型给每张图片生成一段中文描述存进数据库。
+      <b>这是一次性任务</b> —— 打完标以后搜图不再需要这个模型。
+      打标期间嵌入模型会挪到 CPU，搜索会慢一点。
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+      <label class="hint" style="display:flex;align-items:center;gap:5px">
+        时段
+        <input type="number" id="vl-h1" min="0" max="23" placeholder="起"
+               style="width:56px;padding:3px 6px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);color:var(--fg)">
+        ~
+        <input type="number" id="vl-h2" min="0" max="23" placeholder="止"
+               style="width:56px;padding:3px 6px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);color:var(--fg)">
+        <span style="opacity:.7">点（留空=全天）</span>
+      </label>
+      <label class="hint" style="display:flex;align-items:center;gap:5px">
+        范围
+        <select id="vl-folder" style="padding:3px 6px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);color:var(--fg)">
+          <option value="">全部文件夹</option>
+        </select>
+      </label>
+      <label class="hint" style="display:flex;align-items:center;gap:5px">
+        打标模型
+        <select id="vl-model" title="本机视觉模型，或任意外部接口"
+                style="padding:3px 6px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);color:var(--fg);max-width:230px">
+        </select>
+        <!-- 同一个接口换个模型名（项目主 2026-10-18：opencode 有多种模型，不想为此再建一条接口）-->
+        <input id="vl-model-name" list="vl-model-names" placeholder="模型名"
+               title="选外部接口时可以在这里改模型名（同一个 API 也能用和对话不同的模型）"
+               style="width:190px;padding:3px 6px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);color:var(--fg)">
+        <datalist id="vl-model-names"></datalist>
+      </label>
+      <!-- ⚠ 探测按钮必须放在 <label> 外面：放在 label 里时点它会触发 label 的默认行为
+           （聚焦 input），click 事件到不了按钮 → 项目主点了"没反应"✗ -->
+      <button class="ghost tiny" id="vl-probe"
+              title="拉取这个接口支持的模型列表（选外部接口后才能用）">探测</button>
+      <!-- ⚠ 探测结果要能**看见并点**：datalist 必须打字才出候选，用户会以为"没列表"✗
+           所以探测成功后把它填成真正的下拉（#vl-model-pick），点一下就选 ✓ -->
+      <select id="vl-model-pick" title="探测出来的模型，选一个"
+              style="display:none;max-width:230px;padding:3px 6px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);color:var(--fg)">
+      </select>
+      <!-- 探测状态/失败原因（常驻，不再一闪而过）✓ -->
+      <span class="hint" id="vl-probe-msg" style="min-width:160px"></span>
+      <button id="vl-start">开始打标</button>
+      <button class="ghost" id="vl-stop">停止</button>
+      <button class="ghost" id="vl-skip">坏图名单</button>
+    </div>
+    <!-- 当前会用哪个模型（项目主 2026-10-18 问"怎么确认"）：直接显示，不让人猜 ✓ -->
+    <div class="hint" id="vl-who" style="margin-top:4px"></div>
+    <div class="hint" id="vl-progress"></div>
+  </div>
+
+  <!-- PDF 插图打标（队列）—— 2026-10-20 项目主要求：
+       "现在只有针对文件夹打标按钮，那就在旁边增加一个 PDF 插图的打标按钮吧，
+        我手动也方便，也要可以随时暂停开始功能及并到计划中"
+       + "界面也看不到进程啊，这个我怎么监控？" -->
+  <div class="card" id="cpq-card" data-view="personal admin">
+    <h2>PDF 插图打标（队列）
+      <span id="cpq-badge" class="badge" style="float:right">读取中…</span>
+    </h2>
+    <div class="hint" style="margin-bottom:10px">
+      上面那张卡是给<b>图片文件</b>打描述；这张卡是给 <b>PDF 里抠出来的插图</b>打描述
+      （接线图、界面截图、说明书配图那种）。<br>
+      白天索引时只**登记**（不调模型、不花钱），晚上点「🚀 全力执行」会顺手把这里跑完；
+      也可以在这张卡里<b>随时手动开始 / 暂停 / 继续 / 停止</b>，进度实时显示 ✓
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+      <button id="cpq-start">▶ 开始打标</button>
+      <button class="ghost" id="cpq-pause">⏸ 暂停</button>
+      <button class="ghost" id="cpq-resume">▶ 继续</button>
+      <button class="ghost" id="cpq-stop">⏹ 停止</button>
+      <button class="ghost" id="cpq-choose">📄 只打某几份…</button>
+      <span class="hint" id="cpq-scope-note">范围：全部待标</span>
+      <label class="hint" style="display:flex;align-items:center;gap:5px">
+        本次最多
+        <input type="number" id="cpq-limit" min="0" value="200"
+               title="0 或留空 = 一批 200 条，跑完自动接着下一批（直到队列空）"
+               style="width:74px;padding:3px 6px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);color:var(--fg)">
+        条
+      </label>
+      <span class="hint" id="cpq-msg"></span>
+    </div>
+    <!-- 进度条 -->
+    <div style="height:10px;border-radius:99px;background:var(--panel2);overflow:hidden;margin-bottom:8px">
+      <div id="cpq-bar" style="height:100%;width:0%;background:var(--accent,#5b9dff);transition:width .3s"></div>
+    </div>
+    <div class="hint" id="cpq-state" style="line-height:1.9"></div>
+  </div>
+
+  <!-- 📦 快照与异地副本（2026-10-20 项目主要求：手动快照 + 同步进 NAS，路径可自定义） -->
+  <div class="card" id="snap-card" data-view="personal admin">
+    <h2>📦 快照与异地副本
+      <span id="snap-badge" class="badge" style="float:right">读取中…</span>
+    </h2>
+    <div class="hint" style="margin-bottom:10px">
+      一份快照 = <b>代码 + 配置 + 索引库 + 还原说明</b>（约 570 MB），拍完就知道"哪一刻能退回去"。<br>
+      再点「同步过去」把它和增量备份复制到 <b>NAS / 移动硬盘</b>——现在全在 C 盘，
+      盘坏了代码和备份会一起没。
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+      <input type="text" id="snap-note" placeholder="这一刻在做什么（备注，可空）"
+             style="flex:1;min-width:240px;padding:6px 10px;border-radius:8px;
+                    border:1px solid var(--line);background:var(--panel2);color:var(--fg)">
+      <button id="snap-run">📸 立刻拍一份</button>
+      <span class="hint" id="snap-msg"></span>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+      <input type="text" id="snap-target" placeholder="同步目标，例如 Z:\lingxi 或 \\NAS\backup\lingxi"
+             style="flex:1;min-width:280px;padding:6px 10px;border-radius:8px;
+                    border:1px solid var(--line);background:var(--panel2);color:var(--fg)">
+      <button class="ghost" id="snap-save">保存路径</button>
+      <button class="ghost" id="snap-sync">⬆ 同步过去</button>
+      <button class="ghost" id="snap-restore"
+              title="把项目回到某一份快照的状态：代码 / 索引库可以分开选">↩ 还原…</button>
+    </div>
+    <div class="hint" id="snap-state" style="line-height:1.9"></div>
+    <!-- 162 份全列出来会把页面拉得很长 → 固定高度 + 滚动（项目主要求） -->
+    <div id="snap-list" style="margin-top:6px;max-height:340px;overflow-y:auto;
+         border:1px solid var(--line);border-radius:8px;padding:2px 6px"></div>
+  </div>
+
+  <!-- 还原确认（2026-10-20 项目主："要不如何操作还原呢？"） -->
+  <div id="restore-picker" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:70;align-items:center;justify-content:center">
+    <div style="background:var(--panel,#151b28);border:1px solid var(--line,#2b3648);border-radius:12px;width:min(760px,94vw);max-height:86vh;display:flex;flex-direction:column;padding:16px 18px;gap:12px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <b>还原到哪一份快照</b>
+        <span style="flex:1"></span>
+        <button class="ghost tiny" id="restore-close">关闭</button>
+      </div>
+      <div class="hint" id="restore-hint"></div>
+      <select id="restore-name" style="padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);color:var(--fg);max-width:100%"></select>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center">
+        <label class="hint" style="display:flex;align-items:center;gap:6px">
+          <input type="checkbox" id="restore-code" checked> 还原代码（app / docs / 静态页）
+        </label>
+        <label class="hint" style="display:flex;align-items:center;gap:6px">
+          <input type="checkbox" id="restore-db"> 还原索引库（数据回到那一刻）
+        </label>
+      </div>
+      <div class="hint" id="restore-note" style="color:var(--warn)"></div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span class="hint" id="restore-msg"></span>
+        <span style="flex:1"></span>
+        <button id="restore-go">确认还原</button>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- 🤝 共享给我的（2026-10-21 项目主："共享服务做成共享特定用户功能"） -->
+  <div class="card" id="gift-card" data-view="member admin">
+    <h2>🤝 共享给我的
+      <span id="gift-badge" class="badge" style="float:right">读取中…</span>
+    </h2>
+    <div class="hint" style="margin-bottom:10px">
+      别人共享给你的文件夹：<b>能搜、能问答引用、能预览</b>，但<b>不能删也不能改</b> ✓
+    </div>
+    <div id="gift-list" style="max-height:260px;overflow-y:auto;
+         border:1px solid var(--line);border-radius:8px;padding:4px 8px"></div>
+  </div>
+
+  <!-- 📦 我的数据（2026-10-20 项目主："能撤下自己的，但不能删别人的"） -->
+  <div class="card" id="mine-card">
+    <h2>📦 我的数据
+      <span id="mine-badge" class="badge" style="float:right">读取中…</span>
+    </h2>
+    <div class="hint" style="margin-bottom:10px">
+      这些是<b>你上传到这里</b>的文件夹。撤下只会把这边的数据移走，
+      <b>你本机上的文件一点不动</b> ✓ 别人的文件夹这里撤不了。
+    </div>
+    <div id="mine-list" style="max-height:300px;overflow-y:auto;
+         border:1px solid var(--line);border-radius:8px;padding:4px 8px"></div>
+    <div class="hint" id="mine-msg" style="margin-top:8px;line-height:1.8"></div>
+  </div>
+
+  <!-- ⬆ 上传到服务器（2026-10-20 项目主："每人各自管理各自文件、上传同步进服务器"） -->
+  <div class="card" id="push-card" data-view="personal admin">
+    <h2>⬆ 上传到服务器
+      <span id="push-badge" class="badge" style="float:right">读取中…</span>
+    </h2>
+    <div class="hint" style="margin-bottom:10px">
+      把你本机这几个文件夹的<b>文件 + 片段 + 向量</b>打包送到服务器。
+      服务器按路径<b>合并</b>（只增不删，不会盖掉别人的东西），归属记成你本人 ✓<br>
+      第一次建议先点「<b>预演</b>」：服务器只统计、不写库。<br>
+      <b style="color:var(--warn)">身份不由这张卡决定</b>（2026-10-22 项目主定）：
+      上传用哪台服务器、以谁的身份、数据归给谁，
+      一律由「<b>服务器连接</b>」卡里<b>验证通过</b>的那组账号密码决定 ——
+      这里只选文件夹，不再能临时改账号，免得传错人 ✓<br>
+      <span style="color:var(--warn)">💡 本机建库时<b>建议把向量维度和服务器统一</b>
+      （更省空间、检索更快）。不统一也<b>能用</b>——检索会按维度分组，混合维度一样能搜到 ✓</span>
+    </div>
+    <!-- 只读：目标服务器 + 上传身份（来自「服务器连接」里验证过的那一组凭据） -->
+    <div class="hint" id="push-ident"
+         style="margin-bottom:8px;padding:8px 10px;border-radius:8px;line-height:1.9;
+                background:rgba(91,157,255,.06);border:1px solid var(--line)">正在读取服务器连接…</div>
+    <div class="hint" id="push-state" style="line-height:1.9"></div>
+    <div id="push-folders" style="max-height:200px;overflow-y:auto;margin:8px 0;
+         border:1px solid var(--line);border-radius:8px;padding:4px 8px"></div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button class="ghost" id="push-select-all">全选</button>
+      <button class="ghost" id="push-select-none">清空</button>
+      <span style="flex:1"></span>
+      <button class="ghost" id="push-dry">🔍 预演</button>
+      <button id="push-go">⬆ 上传</button>
+    </div>
+    <div id="push-bar-wrap" style="display:none;margin-top:8px">
+      <div style="height:6px;background:rgba(255,255,255,.08);border-radius:3px;overflow:hidden">
+        <div id="push-bar" style="height:100%;width:0;background:var(--accent);transition:width .3s"></div>
+      </div>
+    </div>
+    <div class="hint" id="push-log" style="margin-top:6px;line-height:1.8"></div>
+  </div>
+
+  <!-- 🔒 隐私文件夹（2026-10-20 项目主："我的隐私文件统统放在里面，这样设置更方便"） -->
+  <div class="card" id="priv-card" data-view="personal admin">
+    <h2>🔒 隐私文件夹
+      <span id="priv-badge" class="badge" style="float:right">读取中…</span>
+    </h2>
+    <div class="hint" style="margin-bottom:10px">
+      勾上的文件夹，内容<b>永不出这台机器</b>：<br>
+      · 打标强制走<b>本地视觉模型</b>（图片不发给外部 API）<br>
+      · 问答时它的片段<b>一条都不会发给外部模型</b>（管理员自己也一样）<br>
+      · 本机搜索照常能搜到（不然这个文件夹就没法用了）<br>
+      ⚠ 和「可见性 = 私有」（普通用户看不到）不是一回事，两者可以叠加用。
+    </div>
+    <div id="priv-list" class="hint">正在读取…</div>
+  </div>
+
+  <!-- 选文件打标（2026-10-20 项目主："pdf打标按钮需要指定文件，不能每次只能全部"） -->
+  <div id="cpq-picker" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:60;align-items:center;justify-content:center">
+    <div style="background:var(--panel,#151b28);border:1px solid var(--line,#2b3648);border-radius:12px;width:min(900px,94vw);max-height:84vh;display:flex;flex-direction:column;padding:14px 16px;gap:10px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <b>选择要打标的 PDF</b>
+        <span style="flex:1"></span>
+        <button class="ghost tiny" id="cpq-all">全选</button>
+        <button class="ghost tiny" id="cpq-none">清空</button>
+        <button class="ghost tiny" id="cpq-close">关闭</button>
+      </div>
+      <div class="hint" id="cpq-pick-hint">
+        只列出<b>还有插图待标</b>的文件。每份文件可以单独选模型：
+        <b>本地</b> = 这张图不出机器；<b>外部 API</b> = 更快更准但内容会发出去。
+      </div>
+      <div id="cpq-files" style="overflow:auto;flex:1;min-height:120px"></div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span class="hint" id="cpq-pick-msg"></span>
+        <span style="flex:1"></span>
+        <button id="cpq-ok">用选中的文件开始</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 备份版本管理 -->
+  <div class="card">
+    <h2>数据库备份
+      <button class="ghost tiny" id="bak-now" style="float:right">立即备份</button>
+    </h2>
+    <div class="hint" style="margin-bottom:10px">
+      <b>备份</b>随时可以做（不影响使用）；
+      <b>还原</b>需要先停服务 —— 点还原后会记下标记，
+      下次用 stop.bat 停、search.bat 启动时自动完成替换。
+    </div>
+    <div id="bak-pending" class="hint" style="color:var(--warn);margin-bottom:8px" hidden></div>
+    <div id="bak-list"><div class="empty">正在读取…</div></div>
+    <div class="hint" id="bak-total" style="margin-top:10px"></div>
+  </div>
+
+  <!-- 定时增量备份（2026-10-20 项目主要求：增量省空间 + 份数轮换 + 固定份保护） -->
+  <div class="card" id="bk-card" data-view="personal admin">
+    <h2>💾 定时增量备份
+      <span id="bk-badge" class="badge" style="float:right">读取中…</span>
+    </h2>
+    <div class="hint" style="margin-bottom:10px">
+      上面那套是<b>整库全量快照</b>（简单可靠，但每份都是几百 MB）；
+      这里是<b>增量</b>：只存"这一版变动过的页"，恢复时按链拼回完整库。<br>
+      库现在 442 MB，留 10 份全量要 4.4 GB，增量通常只要几百 MB ✓<br>
+      本机与服务器<b>各存一份</b>（双重保证）；标了 📌 固定的那几份，
+      <b>轮换时永不删除</b> ✓
+    </div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center">
+      <label class="hint" style="display:flex;align-items:center;gap:6px">
+        <input type="checkbox" id="bk-enabled"> 启用定时备份
+      </label>
+      <label class="hint" style="display:flex;align-items:center;gap:6px">
+        保留份数 <input type="number" id="bk-keep" min="1" max="200" style="width:74px">
+      </label>
+      <label class="hint" style="display:flex;align-items:center;gap:6px">
+        间隔（小时） <input type="number" id="bk-interval" min="1" max="720" style="width:80px">
+      </label>
+      <button id="bk-save">保存设置</button>
+      <button class="ghost" id="bk-run">立刻备份</button>
+      <button class="ghost" id="bk-prune">按份数轮换</button>
+      <button class="ghost" id="bk-refresh">刷新</button>
+      <span class="hint" id="bk-msg"></span>
+    </div>
+    <div class="hint" id="bk-state" style="margin-top:10px"></div>
+    <div id="bk-list" style="margin-top:8px"></div>
+  </div>
+
+  </section>
+
+</main>
+
+<!-- 目录选择器（多选） -->
+<div class="modal" id="modal">
+  <div class="box">
+    <div class="head">
+      <button class="ghost tiny" id="up">↑ 上一级</button>
+      <span class="path" id="cur-path">此电脑</span>
+      <button class="ghost tiny" id="here">选中当前目录</button>
+    </div>
+    <div class="modebar" id="catbar">
+      <label class="hint">用途（选一个，自动配好怎么扫）</label>
+      <div id="pick-cats" style="display:flex;gap:6px;flex-wrap:wrap;flex:1"></div>
+    </div>
+    <div class="hint" id="cat-tip" style="margin:-2px 0 8px 0"></div>
+    <div class="modebar">
+      <label class="hint">索引模式</label>
+      <select id="pick-mode"></select>
+      <span class="hint" id="mode-tip">默认用该用途的推荐口径，想微调再动这里</span>
+    </div>
+    <div class="list" id="dir-list"></div>
+    <div class="foot">
+      <span class="hint" id="pick-hint">已选 0 个文件夹</span>
+      <span style="flex:1"></span>
+      <button class="ghost" id="cancel-pick">取消</button>
+      <button id="confirm-pick" disabled>添加并建立索引</button>
+    </div>
+  </div>
+</div>
+
+<!-- 单个文件夹的配置 -->
+<div class="modal" id="cfg-modal">
+  <div class="box">
+    <div class="head">
+      <b id="cfg-title">文件夹配置</b>
+      <span style="flex:1"></span>
+      <button class="ghost tiny" id="cfg-close">关闭</button>
+    </div>
+    <div class="body" id="cfg-body"></div>
+    <div class="foot">
+      <span class="hint" id="cfg-msg"></span>
+      <span style="flex:1"></span>
+      <button class="ghost" id="cfg-cancel">取消</button>
+      <button id="cfg-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 文件预览 -->
+<div class="modal" id="pv-modal">
+  <div class="box">
+    <div class="head">
+      <b id="pv-title">预览</b>
+      <span class="path" id="pv-path"></span>
+      <button class="ghost tiny" id="pv-close">关闭</button>
+    </div>
+    <div class="body" id="pv-body"></div>
+    <div class="foot">
+      <span class="hint" id="pv-msg"></span>
+      <span style="flex:1"></span>
+      <button class="ghost tiny" id="pv-download">下载到本机</button>
+      <button class="ghost tiny" id="pv-reveal">在资源管理器中定位</button>
+      <button class="ghost tiny" id="pv-open">用默认程序打开</button>
+      <button class="ghost tiny" id="pv-copy">复制路径</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="/static/settings.js"></script>
+
+
+
+
+<script src="/static/app.b77c28d42f31.js"></script>
+</body>
+</html>

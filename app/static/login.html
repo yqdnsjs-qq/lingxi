@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" sizes="64x64" href="/static/favicon.png?v=20261022a">
+<link rel="shortcut icon" href="/static/favicon.png?v=20261022a">
+<link rel="apple-touch-icon" href="/static/logo-128.png?v=20261022a">
+<title>宇之语 · 灵犀 — 登录</title>
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--panel2:#1c232d;--fg:#e7ecf5;--muted:#93a1b8;
+        --line:#2a3340;--accent:#5b9dff;--ok:#3ddc97;--warn:#ffb454;--bad:#ff8f8f}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+       background:var(--bg);color:var(--fg);
+       font:15px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  .box{width:min(420px,92vw);background:var(--panel);border:1px solid var(--line);
+       border-radius:14px;padding:26px 24px}
+  h1{font-size:19px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:18px}
+  label{display:block;font-size:13px;color:var(--muted);margin:12px 0 5px}
+  input{width:100%;padding:9px 11px;border-radius:9px;border:1px solid var(--line);
+        background:var(--panel2);color:var(--fg);font-size:15px}
+  input:focus{outline:none;border-color:var(--accent)}
+  button{width:100%;margin-top:18px;padding:10px;border:0;border-radius:9px;
+         background:var(--accent);color:#08131f;font-size:15px;font-weight:600;cursor:pointer}
+  button:disabled{opacity:.55;cursor:default}
+  .tabs{display:flex;gap:6px;margin-bottom:6px}
+  .tabs button{width:auto;margin:0;padding:6px 12px;background:transparent;color:var(--muted);
+               border:1px solid var(--line);font-weight:400;font-size:14px}
+  .tabs button.on{background:var(--panel2);color:var(--fg);border-color:var(--accent)}
+  .msg{margin-top:14px;font-size:13.5px;min-height:20px}
+  .ok{color:var(--ok)} .bad{color:var(--bad)} .hint{color:var(--muted);font-size:12.5px}
+  .who{margin-top:16px;padding-top:14px;border-top:1px solid var(--line);font-size:13.5px}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="box">
+  <h1 style="display:flex;align-items:center;gap:10px"><img src="/static/logo-128.png" alt="" width="34" height="34" style="border-radius:9px;flex:none"><span>宇之语 · 灵犀</span></h1>
+  <div class="sub" id="sub">正在检查登录状态…</div>
+
+  <!-- 首次启动：创建管理员 -->
+  <div id="pane-boot" hidden>
+    <div class="hint" style="margin-bottom:6px">
+      第一次使用：先创建管理员账号。之后由管理员给大家开号（也支持自助注册 + 审批）。
+    </div>
+    <label>管理员用户名</label><input id="b-name" autocomplete="username">
+    <label>密码（至少 6 位）</label><input id="b-pwd" type="password" autocomplete="new-password">
+    <button id="b-go">创建管理员并登录</button>
+  </div>
+
+  <!-- 登录 / 注册 -->
+  <div id="pane-login" hidden>
+    <div class="tabs">
+      <button id="t-login" class="on">登录</button>
+      <button id="t-reg">注册</button>
+    </div>
+    <label>用户名</label><input id="l-name" autocomplete="username">
+    <label>密码</label><input id="l-pwd" type="password" autocomplete="current-password">
+    <button id="l-go">登录</button>
+    <div class="hint" style="margin-top:10px">
+      还没账号？点上面「注册」自助申请，管理员审批后即可使用。<br>
+      <a href="/search?skip=1">先跳过登录，直接进入界面</a>
+      （强制登录会在 P2/P3 和接口拦截一起启用）
+    </div>
+  </div>
+
+  <!-- 已登录 -->
+  <div id="pane-me" hidden>
+    <div class="who">
+      已登录：<b id="me-name"></b>（<span id="me-role"></span>，<span id="me-state"></span>）
+    </div>
+    <button id="go-search">进入搜索界面</button>
+    <button id="do-logout" style="background:transparent;color:var(--muted);
+            border:1px solid var(--line)">退出登录</button>
+  </div>
+
+  <div class="msg" id="msg"></div>
+</div>
+
+<script>
+// 这个页面只做三件事：创建管理员 / 登录 / 注册，然后把你送进 /search。
+
+// ★ 2026-10-21 外网部署：注册入口由后端开关控制（默认关）
+//   allow_register=no 时把「注册」按钮和那句引导都藏掉，省得用户点了吃 403 ✗
+async function applyRegisterSwitch() {
+  let allow = false;
+  try {
+    const st = await api('/api/auth/status');
+    allow = !!st.allow_register;
+  } catch (e) { /* 拿不到就按关闭处理 */ }
+  const btn = document.querySelector('#t-reg');
+  const hint = document.querySelector('#reg-hint') || null;
+  if (btn && !allow) btn.style.display = 'none';
+  if (!allow) {
+    // 顺手把"点上面注册"那句引导也换掉
+    document.querySelectorAll('.hint').forEach((el) => {
+      if ((el.textContent || '').indexOf('自助申请') >= 0) {
+        el.textContent = '还没有账号？请联系管理员开通（本服务未开放自助注册）。';
+      }
+    });
+  }
+}
+try { applyRegisterSwitch(); } catch (e) { /* 忽略 */ }
+// 它**不拦截**任何既有接口（那在 P2/P3 和权限一起上），所以现在打开老界面照样能用。
+const $ = (s) => document.querySelector(s);
+let mode = 'login';
+
+function say(text, cls) {
+  const m = $('#msg');
+  m.className = 'msg ' + (cls || '');
+  m.textContent = text || '';
+}
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    credentials: 'same-origin',
+  });
+  let j = {};
+  try { j = await r.json(); } catch (e) { /* 忽略 */ }
+  if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+  return j;
+}
+
+function show(which) {
+  for (const p of ['boot', 'login', 'me']) $('#pane-' + p).hidden = (p !== which);
+}
+
+function setMode(m) {
+  mode = m;
+  $('#t-login').classList.toggle('on', m === 'login');
+  $('#t-reg').classList.toggle('on', m === 'reg');
+  $('#l-go').textContent = m === 'login' ? '登录' : '注册（等管理员审批）';
+  say('');
+}
+
+async function refresh() {
+  let d;
+  try { d = await api('/api/auth/status'); }
+  catch (e) { $('#sub').textContent = '连不上服务：' + e.message; return; }
+  if (d.need_bootstrap) {
+    $('#sub').textContent = '系统还没有任何账号';
+    show('boot');
+    return;
+  }
+  if (d.user) {
+    $('#sub').textContent = (typeof d.users === 'number')
+    ? ('已经有 ' + d.users + ' 个账号') : '请登录';
+    $('#me-name').textContent = d.user.name;
+    $('#me-role').textContent = d.user.role === 'admin' ? '管理员' : '普通用户';
+    $('#me-state').textContent = { active: '已启用', pending: '待审批', disabled: '已停用' }[d.user.state] || d.user.state;
+    show('me');
+    return;
+  }
+  // ★ 外网拿不到 users（后端只为 null）→ 只说"请登录"，不暴露账号数量 ✓
+  $('#sub').textContent = (typeof d.users === 'number' && d.users > 0)
+    ? ('已有 ' + d.users + ' 个账号，请登录')
+    : '请输入账号密码登录';
+  show('login');
+}
+
+$('#b-go').addEventListener('click', async () => {
+  const name = $('#b-name').value.trim(), pwd = $('#b-pwd').value;
+  if (!name || !pwd) { say('用户名和密码都要填', 'bad'); return; }
+  $('#b-go').disabled = true;
+  try {
+    await api('/api/auth/bootstrap', { name, pwd });
+    say('管理员创建成功，正在进入…', 'ok');
+    setTimeout(() => { location.href = '/search'; }, 600);
+  } catch (e) { say(e.message, 'bad'); } finally { $('#b-go').disabled = false; }
+});
+
+$('#l-go').addEventListener('click', async () => {
+  const name = $('#l-name').value.trim(), pwd = $('#l-pwd').value;
+  if (!name || !pwd) { say('用户名和密码都要填', 'bad'); return; }
+  $('#l-go').disabled = true;
+  try {
+    if (mode === 'login') {
+      await api('/api/auth/login', { name, pwd });
+      say('登录成功，正在进入…', 'ok');
+      setTimeout(() => { location.href = '/search'; }, 500);
+    } else {
+      const d = await api('/api/auth/register', { name, pwd });
+      say(d.note || '已提交，等管理员审批', 'ok');
+      setMode('login');
+      $('#l-name').value = name;
+    }
+  } catch (e) { say(e.message, 'bad'); } finally { $('#l-go').disabled = false; }
+});
+
+$('#t-login').addEventListener('click', () => setMode('login'));
+$('#t-reg').addEventListener('click', () => setMode('reg'));
+$('#go-search').addEventListener('click', () => { location.href = '/search'; });
+$('#do-logout').addEventListener('click', async () => {
+  try { await api('/api/auth/logout', {}); } catch (e) { /* 忽略 */ }
+  location.reload();
+});
+for (const id of ['#b-pwd', '#l-pwd']) {
+  $(id).addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') (id === '#b-pwd' ? $('#b-go') : $('#l-go')).click();
+  });
+}
+refresh();
+</script>
+</body>
+</html>
