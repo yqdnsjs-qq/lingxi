@@ -436,7 +436,10 @@ class Indexer:
             if (not force and old is not None and old["status"] == "ok"
                     and int(old["size"]) == stat.st_size
                     and abs(float(old["mtime"]) - stat.st_mtime) < 1e-6
-                    and not self._ocr_wants_resume(old)):
+                    and not self._ocr_wants_resume(old)
+                    # ★ 2026-11-03：名字向量没写过的，不能因为"状态 ok"就跳过 ✗
+                    #   否则上次扫到一半被中断，这批文件永远没有名字向量（搜不到）✗
+                    and old["name_vec"] is not None):
                 self._update(skipped=self.status()["skipped"] + 1)
                 continue
             work.append((path, stat, sub_of(path)))
@@ -633,6 +636,9 @@ class Indexer:
                      sub_cfgs: dict | None = None) -> None:
         cfg = fcfg or FolderConfig(self.cfg, None, self.engine)
         batch = max(1, cfg.search_batch_size)
+        # ★ 2026-11-03：名字向量的批单独放大 —— search_batch_size 默认 16，
+        #   意味着每 16 个文件就调一次模型，实测只有十几条/秒；凑到 256 条一次编码快十几倍 ✓
+        name_batch = max(256, batch)
         max_bytes = cfg.max_file_mb * 1024 * 1024
         text_pending: list[tuple[int, str, str]] = []        # (file_id, 文本, 类型)
         media_pending: list[tuple[int, Path, Any, str]] = []  # (file_id, 路径, 载荷, 类型)
@@ -649,7 +655,10 @@ class Indexer:
         def flush(force_flush: bool = False) -> None:
             if not text_pending and not media_pending and not name_pending:
                 return
-            if not force_flush and len(text_pending) + len(media_pending) < batch:
+            # ★ 2026-11-03：原来没算 name_pending → `仅文件名` 模式一条都 flush 不出去，
+            #   53 万个名字攒到最后一次性处理，卡几小时 ✗
+            pending_other = len(text_pending) + len(media_pending)
+            if not force_flush and pending_other < batch and len(name_pending) < name_batch:
                 return
 
             if text_pending:
@@ -753,145 +762,160 @@ class Indexer:
                             log.warning("跳过无法编码的媒体文件 %s：%s", path.name, exc2)
 
             if name_pending:
+                self._update(current=f"编码文件名向量 {len(name_pending)} 个…")
                 vectors = self.engine.encode(
                     [item[1] for item in name_pending], prompt_name="Document",
-                    dim=cfg.index_dim)
-                for (fid, _), vec in zip(name_pending, vectors):
-                    self.store.set_name_vec(fid, vec)
+                    dim=cfg.index_dim,
+                    # ★ 2026-11-03：名字很短，cfg.batch_size 默认 8 → 每 8 条一次前向，
+                    #   几乎全是固定开销；一批 64 条实测快数倍 ✓
+                    batch_size=64)
+                # ★ 2026-11-03：批量写（一次事务），代替原来逐条 UPDATE+commit ✓
+                self.store.set_name_vecs(
+                    [(fid, vec) for (fid, _), vec in zip(name_pending, vectors)])
                 name_pending.clear()
 
-        for path, stat, _sub in work:
-            if self._cancel.is_set():
-                return
-            # 这个文件该用哪套口径 ✓：命中了归类的子目录就用它，否则跟随本层 ✓
-            # ⚠ 只有**模态/知识库**会不一样；维度、分块、上限仍取本层（见 folderconf 的取舍）
-            fcfg_of = (sub_cfgs or {}).get(_sub) or cfg
-            self._update(current=path.name)
-            file_id: int | None = None
-            try:
-                kind = extract.classify(path)
-                file_id = self.store.upsert_file(
-                    folder_id, path, stat.st_size, stat.st_mtime, kind)
-
-                name_text = f"{path.stem} {path.parent.name} {kind}"
-                name_pending.append((file_id, name_text))
-
-                if extract.supports_content(kind, fcfg_of) and stat.st_size <= max_bytes:
-                    if kind in ("image", "audio", "video"):
-                        # 必须用「带媒体键的字典」，只给路径会被当成纯文本编码
-                        media_pending.append((file_id, path, {kind: str(path)}, kind))
-                        if kind == "image" and self.cfg.face_enabled:
-                            got = self._extract_faces(file_id, path)
-                            if got > 0:
-                                face_hits = self.status().get("faces", 0) + got
-                                self._update(faces=face_hits)
-                    else:
-                        _kind, raw_text = extract.extract(path, max_bytes)
-                        # ★ 默认清洗（项目主 2026-10-18）：去控制字符/零宽字符、
-                        #   压空行、丢 URL 编码这类噪声行 → 检索更准 ✓
-                        #   清洗后为空就当"没有可提取的文字"✓（不再报异常 ✗）
-                        text = extract.clean_text(raw_text)
-                        # ★ 「这个 PDF 到底有没有可用正文」不能只看文字空不空 ✗
-                        #   2026-10-19 实测：地藏经 160 页**有 515 字**（每页 3.2 字，
-                        #   都是扫描页上零星的页码/拼音），老判据会当它是"文字版"
-                        #   → 跳过 OCR → 正文全丢 ✗ → 改看**每页字数密度** ✓
-                        need_ocr = False
-                        if kind == "pdf" and not text.strip():
-                            need_ocr = True
-                        elif kind == "pdf" and fcfg_of.ocr_enabled:
-                            try:
-                                from . import ocr as _ocr_mod
-                                dens = _ocr_mod.pdf_text_density(path)
-                                if dens.get("needs_ocr"):
-                                    need_ocr = True
-                                    log.info("PDF 文字太稀（%s 字/%s 页，每页 %.1f 字）"
-                                             "→ 当作扫描版处理：%s",
-                                             dens.get("chars"), dens.get("pages"),
-                                             dens.get("per_page", 0), path.name)
-                            except Exception as exc:             # noqa: BLE001
-                                log.debug("算文字密度失败：%s", exc)
-                        if text.strip() and not need_ocr:
-                            pieces = extract.chunk_text(
-                                text, cfg.chunk_chars, cfg.chunk_overlap,
-                                cfg.max_chunks_per_file)
-                            for piece in pieces:
-                                text_pending.append((file_id, piece, kind))
-                            # ★ 插图打标登记（2026-10-19）✓
-                            #   项目主选的范围是"1 和 3"：
-                            #     · 文字版 PDF → 把筛选后的真插图登记进队列 ✓
-                            #     · 扫描版 PDF → 只走整页 OCR 取文字，**不另外标图** ✓
-                            #   所以这里挂在"提得出文字"的分支里 ✓
-                            if kind == "pdf" and fcfg_of.caption_enabled:
-                                self._enqueue_pdf_images(file_id, folder_id, path,
-                                                         fcfg_of)
-                        else:
-                            # ★ 扫描版 OCR（2026-10-19）✓
-                            #   项目主要求："放文件进去能自动判断自动 OCR 进知识库" ✓
-                            #   判断方式：这个 PDF **提不出可用文字** → 但文件夹开了 OCR
-                            #   注意：有文字层的 PDF 根本不会走到这儿（上面就返回了）✓
-                            #   所以"自动判断"是天然的：不用另设开关去猜 ✓
-                            if kind == "pdf" and fcfg_of.ocr_enabled:
-                                ocr_text, ocr_note = self._ocr_pdf_text(path, file_id)
-                                ocr_text = extract.clean_text(ocr_text)
-                                if ocr_text.strip():
-                                    pieces = extract.chunk_text(
-                                        ocr_text, cfg.chunk_chars, cfg.chunk_overlap,
-                                        cfg.max_chunks_per_file)
-                                    for piece in pieces:
-                                        text_pending.append((file_id, piece, "pdf"))
-                                    self.store.mark_ok(file_id, ocr_note)
-                                    log.info("扫描版 OCR 成功：%s（%d 片）",
-                                             path.name, len(pieces))
-                                else:
-                                    self.store.clear_file_chunks(file_id,
-                                                                 keep_caption=True)
-                                    self.store.mark_ok(
-                                        file_id, ocr_note or "扫描版 OCR：没识别出文字")
-                            else:
-                                self.store.clear_file_chunks(file_id, keep_caption=True)
-                                why = ("没有可提取的文字" if not raw_text.strip()
-                                       else "清洗后没有有效文字（原文是乱码/链接噪声）")
-                                self.store.mark_ok(file_id, why)
-                else:
-                    self.store.clear_file_chunks(file_id, keep_caption=True)
-                    if kind != "image":
-                        self.store.clear_file_faces(file_id)
-                    if stat.st_size > max_bytes:
-                        self.store.mark_ok(file_id, "文件过大，只索引文件名")
-                    else:
-                        self.store.mark_ok(file_id, "该类型不索引内容")
-
-                status = self.status()
-                self._update(done=status["done"] + 1, indexed=status["indexed"] + 1,
-                             folder_done=status["folder_done"] + 1)
-                flush()
-            except Exception as exc:  # noqa: BLE001
-                # ⚠ 带堆栈 ✓（2026-10-19：以前只记一句话，看不到真因 ✗；
-                #   而 exc_info=True 在这个日志格式下没打出来 ✗ → 直接格式化成文本 ✓）
-                import traceback as _tb
-                log.warning("索引失败 %s: %s\n%s", path, exc, _tb.format_exc())
-                # ⚠ 2026-10-18 项目主要求：**文件本身格式不支持/损坏**不该算"异常"✗
-                #   它只是"这个文件没法索引内容"，跟系统出问题不是一回事。
-                #   （之前 obsidian 里 27 张 avif/损坏图片全被算成异常，数字吓人 ✓ 现在不算了）
-                msg = str(exc)
-                soft = any(k in msg for k in (
-                    "无法识别", "decoder", "truncated", "cannot identify",
-                    "Unsupported", "不支持", "image file is", "cannot be opened",
-                ))
+        # ★ 2026-11-03：整段包进一个事务，每 500 个文件落盘一次。
+        #   以前每条 UPDATE 都 commit（fsync），5 万个文件就能慢到十几倍时间 ✗
+        self.store.commit()
+        # ★ 2026-11-03：整段包进一个事务，每 500 个文件落盘一次。
+        #   1）原来每条 upsert 都 commit（fsync），一个 500 万文件的目录能拖到十几小时 ✗
+        #   2）上次这么做卡死，真因是 store._batching 没初始化（AttributeError），已修 ✓
+        self.store.commit()
+        with self.store.batch():
+            for _i, (path, stat, _sub) in enumerate(work):
+                if _i and _i % 500 == 0:
+                    self.store.commit()
+                if self._cancel.is_set():
+                    return
+                # 这个文件该用哪套口径 ✓：命中了归类的子目录就用它，否则跟随本层 ✓
+                # ⚠ 只有**模态/知识库**会不一样；维度、分块、上限仍取本层（见 folderconf 的取舍）
+                fcfg_of = (sub_cfgs or {}).get(_sub) or cfg
+                self._update(current=path.name)
+                file_id: int | None = None
                 try:
-                    if soft and file_id is not None:
-                        self.store.mark_ok(
-                            file_id, "文件格式不支持或已损坏，已跳过内容（不算异常）")
+                    kind = extract.classify(path)
+                    file_id = self.store.upsert_file(
+                        folder_id, path, stat.st_size, stat.st_mtime, kind)
+
+                    name_text = f"{path.stem} {path.parent.name} {kind}"
+                    name_pending.append((file_id, name_text))
+
+                    if extract.supports_content(kind, fcfg_of) and stat.st_size <= max_bytes:
+                        if kind in ("image", "audio", "video"):
+                            # 必须用「带媒体键的字典」，只给路径会被当成纯文本编码
+                            media_pending.append((file_id, path, {kind: str(path)}, kind))
+                            if kind == "image" and self.cfg.face_enabled:
+                                got = self._extract_faces(file_id, path)
+                                if got > 0:
+                                    face_hits = self.status().get("faces", 0) + got
+                                    self._update(faces=face_hits)
+                        else:
+                            _kind, raw_text = extract.extract(path, max_bytes)
+                            # ★ 默认清洗（项目主 2026-10-18）：去控制字符/零宽字符、
+                            #   压空行、丢 URL 编码这类噪声行 → 检索更准 ✓
+                            #   清洗后为空就当"没有可提取的文字"✓（不再报异常 ✗）
+                            text = extract.clean_text(raw_text)
+                            # ★ 「这个 PDF 到底有没有可用正文」不能只看文字空不空 ✗
+                            #   2026-10-19 实测：地藏经 160 页**有 515 字**（每页 3.2 字，
+                            #   都是扫描页上零星的页码/拼音），老判据会当它是"文字版"
+                            #   → 跳过 OCR → 正文全丢 ✗ → 改看**每页字数密度** ✓
+                            need_ocr = False
+                            if kind == "pdf" and not text.strip():
+                                need_ocr = True
+                            elif kind == "pdf" and fcfg_of.ocr_enabled:
+                                try:
+                                    from . import ocr as _ocr_mod
+                                    dens = _ocr_mod.pdf_text_density(path)
+                                    if dens.get("needs_ocr"):
+                                        need_ocr = True
+                                        log.info("PDF 文字太稀（%s 字/%s 页，每页 %.1f 字）"
+                                                 "→ 当作扫描版处理：%s",
+                                                 dens.get("chars"), dens.get("pages"),
+                                                 dens.get("per_page", 0), path.name)
+                                except Exception as exc:             # noqa: BLE001
+                                    log.debug("算文字密度失败：%s", exc)
+                            if text.strip() and not need_ocr:
+                                pieces = extract.chunk_text(
+                                    text, cfg.chunk_chars, cfg.chunk_overlap,
+                                    cfg.max_chunks_per_file)
+                                for piece in pieces:
+                                    text_pending.append((file_id, piece, kind))
+                                # ★ 插图打标登记（2026-10-19）✓
+                                #   项目主选的范围是"1 和 3"：
+                                #     · 文字版 PDF → 把筛选后的真插图登记进队列 ✓
+                                #     · 扫描版 PDF → 只走整页 OCR 取文字，**不另外标图** ✓
+                                #   所以这里挂在"提得出文字"的分支里 ✓
+                                if kind == "pdf" and fcfg_of.caption_enabled:
+                                    self._enqueue_pdf_images(file_id, folder_id, path,
+                                                             fcfg_of)
+                            else:
+                                # ★ 扫描版 OCR（2026-10-19）✓
+                                #   项目主要求："放文件进去能自动判断自动 OCR 进知识库" ✓
+                                #   判断方式：这个 PDF **提不出可用文字** → 但文件夹开了 OCR
+                                #   注意：有文字层的 PDF 根本不会走到这儿（上面就返回了）✓
+                                #   所以"自动判断"是天然的：不用另设开关去猜 ✓
+                                if kind == "pdf" and fcfg_of.ocr_enabled:
+                                    ocr_text, ocr_note = self._ocr_pdf_text(path, file_id)
+                                    ocr_text = extract.clean_text(ocr_text)
+                                    if ocr_text.strip():
+                                        pieces = extract.chunk_text(
+                                            ocr_text, cfg.chunk_chars, cfg.chunk_overlap,
+                                            cfg.max_chunks_per_file)
+                                        for piece in pieces:
+                                            text_pending.append((file_id, piece, "pdf"))
+                                        self.store.mark_ok(file_id, ocr_note)
+                                        log.info("扫描版 OCR 成功：%s（%d 片）",
+                                                 path.name, len(pieces))
+                                    else:
+                                        self.store.clear_file_chunks(file_id,
+                                                                     keep_caption=True)
+                                        self.store.mark_ok(
+                                            file_id, ocr_note or "扫描版 OCR：没识别出文字")
+                                else:
+                                    self.store.clear_file_chunks(file_id, keep_caption=True)
+                                    why = ("没有可提取的文字" if not raw_text.strip()
+                                           else "清洗后没有有效文字（原文是乱码/链接噪声）")
+                                    self.store.mark_ok(file_id, why)
                     else:
-                        self.store.set_file_error(file_id, folder_id, path, msg)
-                except Exception:  # noqa: BLE001
-                    pass
-                status = self.status()
-                if soft:
-                    # 不计入 errors ✓（但进度照样往前 ✓）
+                        self.store.clear_file_chunks(file_id, keep_caption=True)
+                        if kind != "image":
+                            self.store.clear_file_faces(file_id)
+                        if stat.st_size > max_bytes:
+                            self.store.mark_ok(file_id, "文件过大，只索引文件名")
+                        else:
+                            self.store.mark_ok(file_id, "该类型不索引内容")
+
+                    status = self.status()
                     self._update(done=status["done"] + 1, indexed=status["indexed"] + 1,
                                  folder_done=status["folder_done"] + 1)
-                else:
-                    self._update(done=status["done"] + 1, errors=status["errors"] + 1,
-                                 folder_done=status["folder_done"] + 1)
+                    flush()
+                except Exception as exc:  # noqa: BLE001
+                    # ⚠ 带堆栈 ✓（2026-10-19：以前只记一句话，看不到真因 ✗；
+                    #   而 exc_info=True 在这个日志格式下没打出来 ✗ → 直接格式化成文本 ✓）
+                    import traceback as _tb
+                    log.warning("索引失败 %s: %s\n%s", path, exc, _tb.format_exc())
+                    # ⚠ 2026-10-18 项目主要求：**文件本身格式不支持/损坏**不该算"异常"✗
+                    #   它只是"这个文件没法索引内容"，跟系统出问题不是一回事。
+                    #   （之前 obsidian 里 27 张 avif/损坏图片全被算成异常，数字吓人 ✓ 现在不算了）
+                    msg = str(exc)
+                    soft = any(k in msg for k in (
+                        "无法识别", "decoder", "truncated", "cannot identify",
+                        "Unsupported", "不支持", "image file is", "cannot be opened",
+                    ))
+                    try:
+                        if soft and file_id is not None:
+                            self.store.mark_ok(
+                                file_id, "文件格式不支持或已损坏，已跳过内容（不算异常）")
+                        else:
+                            self.store.set_file_error(file_id, folder_id, path, msg)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    status = self.status()
+                    if soft:
+                        # 不计入 errors ✓（但进度照样往前 ✓）
+                        self._update(done=status["done"] + 1, indexed=status["indexed"] + 1,
+                                     folder_done=status["folder_done"] + 1)
+                    else:
+                        self._update(done=status["done"] + 1, errors=status["errors"] + 1,
+                                     folder_done=status["folder_done"] + 1)
         flush(True)

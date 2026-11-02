@@ -1,11 +1,11 @@
 # 宇之语 · 灵犀　本地资料，搜得到、问得清
 
-[![版本](https://img.shields.io/badge/version-v3.5.6-3b82f6)](https://github.com/yqdnsjs-qq/lingxi/releases)
+[![版本](https://img.shields.io/badge/version-v3.5.7-3b82f6)](https://github.com/yqdnsjs-qq/lingxi/releases)
 [![平台](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-64748b)](#)
 [![数据](https://img.shields.io/badge/data-本地优先-22c55e)](docs/技术说明.md)
 [![仓库](https://img.shields.io/badge/repo-yqdnsjs--qq%2Flingxi-181717?logo=github)](https://github.com/yqdnsjs-qq/lingxi)
 
-> 当前版本 **v3.5.6**（2026-11-02）｜Windows 本机版 / Linux 服务器版｜
+> 当前版本 **v3.5.7**（2026-11-03）｜Windows 本机版 / Linux 服务器版｜
 > 安装部署见 [docs/安装部署手册-v3.5.md](docs/安装部署手册-v3.5.md)
 
 ![灵犀：本地资料，搜得到、问得清](docs/images/article/01-灵犀封面.jpg)

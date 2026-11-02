@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -571,8 +572,32 @@ class Store:
     def _exec(self, sql: str, args: tuple = ()) -> sqlite3.Cursor:
         with self._lock:
             cur = self._conn.execute(sql, args)
-            self._conn.commit()
+            # 批量期间由 batch() 统一提交；getattr 兜底，防止老实例没这个属性 ✗
+            if not getattr(self, "_batching", False):
+                self._conn.commit()
             return cur
+
+    @contextlib.contextmanager
+    def batch(self):
+        """把一批写操作合成一个事务（索引器用）。
+
+        ★ 2026-11-03：原来每条语句都 commit，扫 53 万个文件就是 53 万次 fsync，
+          实测要几小时；包进一个事务 + 每几百个文件提交一次，快几十倍 ✓
+          中途崩了最多丢最后一批（下次扫描会补上），不影响已提交的数据。
+        """
+        with self._lock:
+            self._batching = True
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._batching = False
+                self._conn.commit()
+
+    def commit(self) -> None:
+        """批量期间手动落盘一次（每 N 个文件调一次）。"""
+        with self._lock:
+            self._conn.commit()
 
     def _query(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
         with self._lock:
@@ -899,7 +924,10 @@ class Store:
                      size, mtime, kind, now, note),
                 )
                 file_id = int(cur.lastrowid)
-            self._conn.commit()
+            # ★ 2026-11-03：批量期间不逐条提交。原来这里无视 _batching，
+            #   每个文件一次 fsync，实测只有 30 条/秒 —— 53 万文件要 5 小时 ✗
+            if not getattr(self, "_batching", False):
+                self._conn.commit()
         self._invalidate()
         return file_id
 
@@ -979,9 +1007,25 @@ class Store:
         self._invalidate()
 
     def set_name_vec(self, file_id: int, vector: Any) -> None:
-        vec = np.asarray(vector, dtype=np.float32).reshape(-1)
-        self._exec("UPDATE files SET name_vec=?, name_dim=? WHERE id=?",
-                   (_to_blob(vec), int(vec.shape[0]), file_id))
+        self.set_name_vecs([(file_id, vector)])
+
+    def set_name_vecs(self, items: list[tuple[int, Any]]) -> None:
+        """批量写"文件名向量"（一次事务）。
+
+        ★ 2026-11-03 实测：`仅文件名` 模式扫到 53 万个文件时，原来每个文件
+          一次 UPDATE + 一次 commit（fsync），跑到几小时还没完 ✗
+          → 改成 executemany + 单事务，几千个一批，速度差几十倍 ✓
+        """
+        if not items:
+            return
+        rows = []
+        for file_id, vector in items:
+            vec = np.asarray(vector, dtype=np.float32).reshape(-1)
+            rows.append((_to_blob(vec), int(vec.shape[0]), int(file_id)))
+        with self._lock:
+            self._conn.executemany(
+                "UPDATE files SET name_vec=?, name_dim=? WHERE id=?", rows)
+            self._conn.commit()
 
     # ------------------------------------------------------------ 统计
     def stats(self, folder_ids: list[int] | None = None) -> dict[str, Any]:
