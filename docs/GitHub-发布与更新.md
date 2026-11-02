@@ -150,7 +150,7 @@ start.bat
 
 | 项 | 值 |
 |---|---|
-| 仓库 | <https://github.com/admin-qq/lingxi>（public） |
+| 仓库 | <https://github.com/yqdnsjs-qq/lingxi>（public） |
 | 分支 / 提交 | `main` · **`618d1ef`**「灵犀 v3.5.3」（单提交） |
 | 文件数 | **142** 个（约 4.7 MB） |
 | 脱敏 | 34 个文件被替换；自检 **残留 0 命中** |

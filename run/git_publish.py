@@ -52,7 +52,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DEST = Path(r"D:\lingxi-publish")
-REPO_URL = "https://github.com/admin-qq/lingxi.git"
+REPO_URL = "https://github.com/yqdnsjs-qq/lingxi.git"
 MAP_FILE = ROOT / "run" / ".pii_map.json"
 
 try:                                    # 控制台是 GBK，输出里带 ✗ ✓ 会炸
