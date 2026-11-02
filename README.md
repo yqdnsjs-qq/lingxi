@@ -1,13 +1,13 @@
 # 宇之语 · 灵犀   本地部署 + 文件与知识检索
 
-[![版本](https://img.shields.io/badge/version-v3.5.5-3b82f6)](https://github.com/yqdnsjs-qq/lingxi/releases)
+[![版本](https://img.shields.io/badge/version-v3.5.6-3b82f6)](https://github.com/yqdnsjs-qq/lingxi/releases)
 [![平台](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-64748b)](#)
 [![数据](https://img.shields.io/badge/data-100%25%20local-22c55e)](#六安全建议)
 [![仓库](https://img.shields.io/badge/repo-yqdnsjs--qq%2Flingxi-181717?logo=github)](https://github.com/yqdnsjs-qq/lingxi)
 
 > **灵犀**是装在自己电脑（或自己服务器）上的私有知识库：把散在磁盘里的文档、图片、录音
 > 变成可搜、可问、可管的东西——答案带出处，数据一步不出本机。
-> 当前版本 **v3.5.5**（2026-11-02）｜仓库：<https://github.com/yqdnsjs-qq/lingxi>
+> 当前版本 **v3.5.6**（2026-11-02）｜仓库：<https://github.com/yqdnsjs-qq/lingxi>
 
 把 Google 的 [google/embeddinggemma-2](https://huggingface.co/google/embeddinggemma-2) 多模态嵌入模型
 完整部署在**本文件夹内**，并附带一个**本地文件语义搜索程序**：选一个文件夹建立索引，

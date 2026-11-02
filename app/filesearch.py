@@ -1695,6 +1695,9 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
             "engines": _ocr.list_engines(),
             "mineru_api": _ocr.mineru_api_alive(),
             "oxr_api": _ocr.oxr_api_alive(),
+            "mineru_api_url": _ocr._mineru_api(),      # noqa: SLF001
+            "oxr_api_url": (_ocr._ini_ocr().get("oxr_api")   # noqa: SLF001
+                            or "http://127.0.0.1:8000"),
             "free_hint": _ocr.free_gpu_hint(),
             "auto_batch": _ocr.auto_batch(),
             "min_chars_per_page": _ocr.MIN_CHARS_PER_PAGE,

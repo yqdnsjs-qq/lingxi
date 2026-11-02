@@ -146,6 +146,12 @@ class gpu_slot(AbstractContextManager):
         return False
 
 # ---- 各引擎的环境与桥（都在项目外，互不干扰）----
+def _mineru_api() -> str:
+    """MinerU 的 API 地址（默认 8000，但 OXR 也用 8000 → 必须能改）。"""
+    return (_ini_ocr().get("mineru_api") or os.environ.get("EG2_OCR_MINERU_API")
+            or "http://127.0.0.1:8000")
+
+
 ENGINES: dict[str, dict] = {
     "ppocr": {
         "python": _p("EG2_OCR_PPOCR_PY", "ppocr_python",
@@ -179,7 +185,8 @@ ENGINES: dict[str, dict] = {
                      r"D:\GJ\MinerU\runtime\python\python.exe"),
         "bridge": _p("EG2_OCR_MINERU_BRIDGE", "mineru_bridge",
                      r"D:\GJ\MinerU\tools\submit_mineru_task.py"),
-        "args": ["--backend", "pipeline", "--api-url", "http://127.0.0.1:8000"],
+        # ★ 2026-11-02：地址改成可配。MinerU 默认也是 8000，会和 OXR 抢端口 ✗
+        "args": ["--backend", "pipeline", "--api-url", _mineru_api()],
         "label": "MinerU（结构化 Markdown + 自动提图，最强）",
         "gpu": True,
     },
@@ -225,18 +232,20 @@ def oxr_api_alive(timeout: float = 3.0) -> bool:
 
 
 def mineru_api_alive(timeout: float = 3.0) -> bool:
-    """MinerU 的 API（127.0.0.1:8000）在跑吗。"""
+    """MinerU 的 API 在跑吗（认 /file_parse，避免把同端口的 OXR 误判成 MinerU）。"""
     import urllib.error
     import urllib.request
-    for path in ("/health", "/docs"):
-        try:
-            with urllib.request.urlopen("http://127.0.0.1:8000" + path,
-                                        timeout=timeout) as r:
-                if r.status == 200:
-                    return True
-        except Exception:                                        # noqa: BLE001
-            continue
-    return False
+
+    api = _mineru_api().rstrip("/")
+    # ★ 2026-11-02：以前只要 8000 端口有 HTTP 就返回 True ——
+    #   OXR 的解析服务也用 8000，于是 MinerU 明明没起也会显示「运行中」✗
+    #   现在认它自己的接口：openapi 里必须有 /file_parse ✓
+    try:
+        with urllib.request.urlopen(api + "/openapi.json", timeout=timeout) as r:
+            body = r.read(200_000).decode("utf-8", "replace")
+        return "/file_parse" in body
+    except Exception:                                            # noqa: BLE001
+        return False
 
 
 def start_mineru_api(wait_seconds: int = 120) -> tuple[bool, str]:

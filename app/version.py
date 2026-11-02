@@ -9,11 +9,16 @@
 """
 from __future__ import annotations
 
-VERSION = "3.5.5"
-BUILD = "2026-11-02-17:20"            # 前端 EG2_BUILD 用同一个值
+VERSION = "3.5.6"
+BUILD = "2026-11-02-17:50"            # 前端 EG2_BUILD 用同一个值
 
 # 最近几条（新的在前）；完整的看 docs/更新日志.md
 CHANGELOG: list[tuple[str, list[str]]] = [
+    ("3.5.6", [
+        "MinerU 的 API 地址改成可配置（[ocr] mineru_api）：它默认也是 8000，会和 OXR 抢端口",
+        "修：MinerU 没在跑却显示「运行中」—— 以前只要 8000 有 HTTP 就算活着，现在认它自己的 /file_parse",
+        "设置页 OCR 提示行同时显示 MinerU 与 OXR 的地址，方便发现端口撞车",
+    ]),
     ("3.5.5", [
         "新增第 4 个 OCR 引擎 OXR：版面理解 + 表格还原，扫出来的表格会变成真正的 HTML 表格",
         "OXR 走 HTTP 桥接（D:\\GJ\\AIOXR 那三个服务），不占灵犀自己的显存，两个项目互不干扰",
