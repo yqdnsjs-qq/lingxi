@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.stdout.reconfigure(errors="replace")
 BASE = "http://127.0.0.1:8199"
 BAT = ROOT / "app" / "run_server.bat"
+HIDDEN_VBS = ROOT / "app" / "run_server_hidden.vbs"   # 隐藏启动器
 PIDFILE = ROOT / "run" / "server.pid"
 
 
@@ -174,6 +175,15 @@ def start(minimized: bool = True) -> None:
     #   界面上的「↩ 还原」只是登记，真正换代码/换库必须发生在服务停着的这个窗口里
     #   （服务开着时换库会被占用、换代码当前进程也用不上）
     apply_pending_restore()
+    # ★ 2026-11-02 项目主：服务窗口那个黑框"实在碍眼、一不小心就误关" →
+    #   默认用 VBS 隐藏启动，进程照常跑，窗口不可见也关不掉 ✓
+    #   想看窗口时用 --visible / --show-window，仍走老办法（最小化的黑框）。
+    if minimized and HIDDEN_VBS.is_file():
+        subprocess.Popen(["wscript", "//nologo", str(HIDDEN_VBS)],
+                         cwd=str(ROOT),
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"   已启动（隐藏窗口，关不掉）：{BAT.name}")
+        return
     style = "/min " if minimized else ""
     # 和 start.bat 里那句完全同形（注意内层两对引号：run_server.bat 路径带空格也稳）
     cmd = f'cmd /c start "宇之语·灵犀 服务窗口" {style}cmd /c ""{BAT}""'

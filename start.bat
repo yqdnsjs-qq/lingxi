@@ -1,5 +1,7 @@
 @echo off
 chcp 936 >nul
+rem 1 = 由 启动灵犀.vbs 隐藏启动（不能用真 pause）
+if not defined EG2_HIDDEN set "EG2_HIDDEN=0"
 title 宇之语·灵犀 - 启动
 cd /d "%~dp0"
 
@@ -42,7 +44,7 @@ if not exist "%PY%" (
   echo [错误] 还没有安装运行环境。
   echo        请先双击运行 setup.bat 完成安装。
   echo.
-  pause
+call :pause_or_wait
   exit /b 1
 )
 
@@ -66,7 +68,7 @@ if not exist "%MODELDIR%\config.json" (
   echo [错误] 模型文件不存在：%MODELDIR%
   echo        请先双击运行 setup.bat 下载模型。
   echo.
-  pause
+call :pause_or_wait
   exit /b 1
 )
 
@@ -121,7 +123,8 @@ rem ---- 启动 ----
 echo 正在启动服务（模型加载需要 10-60 秒，请稍候）…
 echo 服务窗口已最小化，运行日志：%ROOT%\logs\server.log
 echo.
-start "宇之语·灵犀 服务窗口" /min cmd /c ""%ROOT%\app\run_server.bat""
+rem ★ 2026-11-02 项目主：这个黑框太碍眼、还容易误关 → 改成隐藏启动
+wscript //nologo "%ROOT%\app\run_server_hidden.vbs"
 
 set /a TRIES=0
 :waitloop
@@ -159,7 +162,7 @@ powershell -NoProfile -Command "if (Test-Path '%ROOT%\logs\server.log') { Get-Co
 echo ------------------------------------------------------------
 echo 完整日志：%ROOT%\logs\server.log
 echo.
-pause
+call :pause_or_wait
 exit /b 1
 
 rem ============================================================
@@ -188,4 +191,12 @@ rem taskkill 自带 WINDOWTITLE 过滤器，比「tasklist 解析出 PID 再杀」可靠
 rem （tasklist /v 在有些机器上会因权限失败）。
 :kill_service_windows
 for %%T in ("宇之语·灵犀 服务窗口" "宇之语·灵犀 服务" "EmbeddingGemma 2 服务窗口") do taskkill /f /fi "WINDOWTITLE eq %%~T" >nul 2>nul
+exit /b 0
+rem ---- 隐藏模式下不能真 pause：窗口看不见，会一直挂着 ----
+:pause_or_wait
+if "%EG2_HIDDEN%"=="1" (
+  >nul ping -n 9 127.0.0.1
+  exit /b 0
+)
+pause
 exit /b 0

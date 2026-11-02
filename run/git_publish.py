@@ -177,16 +177,48 @@ def syntax_check(dest: Path) -> list[str]:
     return errs
 
 
+def _commit_msg() -> str:
+    """提交信息只写版本号。
+
+    2026-11-02 用户反馈：GitHub 文件列表里每个文件后面都会跟一句
+    "灵犀 v3.5.3（公开版，已脱敏）"，很碍眼 → 去掉，只留版本号 ✓
+    """
+    try:
+        ns: dict = {}
+        exec((ROOT / "app" / "version.py").read_text(encoding="utf-8"), ns)  # noqa: S102
+        ver = str(ns.get("VERSION") or "").strip()
+        return f"灵犀 v{ver}" if ver else "灵犀"
+    except Exception:                                            # noqa: BLE001
+        return "灵犀"
+
+
+def sync_remote(dest: Path, token: str) -> None:
+    """把发布副本对齐远端最新提交（在复制文件**之前**做）。
+
+    2026-11-02：发布目录被删过/换过时，本地历史与远端不是一条线，
+    直接 push 会被拒（non-fast-forward）；先 fetch + reset 再提交就顺了 ✓
+    注意顺序：必须**先对齐、再复制**，否则 reset 会把刚复制的文件冲回去。
+    """
+    if not (dest / ".git").is_dir() or not token:
+        return
+    url0 = REPO_URL.replace("https://", f"https://x-access-token:{token}@")
+    r = run(["git", "fetch", "--depth=1", url0, "main"], dest, check=False)
+    if r.returncode == 0:
+        run(["git", "reset", "--hard", "FETCH_HEAD"], dest, check=False)
+        print("   已对齐远端最新提交（fetch + reset）")
+
+
 def git_commit(dest: Path, push: bool, token: str) -> None:
     if not (dest / ".git").is_dir():
         run(["git", "init", "-b", "main"], dest)
         run(["git", "remote", "add", "origin", REPO_URL], dest, check=False)
+
     run(["git", "add", "-A"], dest)
     st = run(["git", "status", "--porcelain"], dest).stdout.strip()
     if st:
         run(["git", "-c", "user.name=admin",
              "-c", "user.email=admin@users.noreply.github.com",
-             "commit", "-q", "-m", "灵犀 v3.5.3（公开版，已脱敏）"], dest)
+             "commit", "-q", "-m", _commit_msg()], dest)
     run(["git", "remote", "set-url", "origin", REPO_URL], dest, check=False)
     if not push:
         print("   没加 --push，跳过推送")
@@ -211,6 +243,8 @@ def main() -> int:
 
     pairs, must = load_map()
     dest = Path(args.dir)
+    print("⓪ 对齐远端（有 token 时）")
+    sync_remote(dest, os.environ.get("GH_TOKEN", ""))
     print(f"① 导出已跟踪文件 → {dest}")
     if dest.exists():
         for sub in ("app", "docs", "run"):
