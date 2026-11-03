@@ -996,9 +996,17 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         except Exception as exc:                                  # noqa: BLE001
             log.warning("取可写文件夹失败，按「只看自己的」处理：%s", exc)
             wset = set()
-        folders = [f for f in store.list_folders()
-                   if (vis is None or int(f["id"]) in vis)
-                   and (wset is None or int(f["id"]) in wset)]
+        # ★ 2026-11-03：目录存在性检查会走网络盘（一次几秒），
+        #   直接放在 async 里会把整个事件循环堵住（健康检查都超时）✗
+        #   → 丢到线程池里跑，界面和 /health 保持可用 ✓
+        from starlette.concurrency import run_in_threadpool
+        # 用显式函数包一层：多行推导式没法写成 lambda ✓
+        def _list() -> list:
+            return [f for f in store.list_folders()
+                    if (vis is None or int(f["id"]) in vis)
+                    and (wset is None or int(f["id"]) in wset)]
+
+        folders = await run_in_threadpool(_list)
         for folder in folders:
             fcfg = FolderConfig(cfg, folder.get("config"), engine)
             folder["summary"] = fcfg.summary()
@@ -3050,7 +3058,12 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
 
     @router.get("/api/index/status")
     async def index_status():
-        return {"status": indexer.status(), "stats": store.stats()}
+        # ★ 2026-11-03：stats() 是 5 个聚合查询（2GB 库上要几秒），
+        #   直接放在 async 里会把事件循环堵死 → /health 都超时 ✗
+        #   丢线程池跑，页面与监控始终可用 ✓
+        from starlette.concurrency import run_in_threadpool
+        stats = await run_in_threadpool(store.stats)
+        return {"status": indexer.status(), "stats": stats}
 
     # ---------------------------------------------------------- 搜索
     @router.get("/api/search")

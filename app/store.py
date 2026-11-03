@@ -1037,6 +1037,16 @@ class Store:
           older_ids=[...] = 只算这些文件夹（普通用户只看自己能用的）
           older_ids=[]    = 什么都看不到 → 全 0（不能退化成全站 ✗）
         """
+        # ★ 2026-11-03：结果缓存 15 秒。
+        #   界面和监控每隔几秒轮询 /api/index/status，每次都跑 5 个聚合查询；
+        #   在 689k 行 / 2GB 的库上每次 1~2 秒，还和索引线程抢同一把库锁
+        #   → 索引被拖到 30 个/秒以下（实测）。缓存后索引不再被轮询饿死 ✓
+        _key = None if folder_ids is None else tuple(int(x) for x in folder_ids)
+        _now = time.time()
+        _cache = getattr(self, "_stats_cache", None)
+        if _cache and _now - _cache[0] < 15 and _cache[1] == _key:
+            return dict(_cache[2])
+
         if folder_ids is None:
             files = self._query("SELECT COUNT(*) c FROM files")[0]["c"]
             chunks = self._query("SELECT COUNT(*) c FROM chunks")[0]["c"]
@@ -1066,9 +1076,11 @@ class Store:
             kinds = {row["kind"] or "other": row["c"] for row in self._query(
                 "SELECT kind, COUNT(*) c FROM files "
                 f"WHERE folder_id IN ({marks}) GROUP BY kind ORDER BY c DESC", args)}
-        return {"files": files, "chunks": chunks, "errors": errors,
-                "bytes": size, "kinds": kinds, "dim": self.get_meta("dim"),
-                "scoped": folder_ids is not None}
+        out = {"files": files, "chunks": chunks, "errors": errors,
+               "bytes": size, "kinds": kinds, "dim": self.get_meta("dim"),
+               "scoped": folder_ids is not None}
+        self._stats_cache = (_now, _key, dict(out))
+        return out
 
     # ------------------------------------------------------------ 向量缓存
     def _invalidate(self) -> None:
