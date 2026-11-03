@@ -1,7 +1,7 @@
 // 版本标记：F12 Console 里能看到，方便判断"你打开的是不是最新页面"
 // （改完前端一定要 Ctrl+F5 硬刷新，普通刷新有时还是旧 JS）
-const EG2_BUILD = '2026-11-03-16:10';
-const EG2_VER = '3.5.8';
+const EG2_BUILD = '2026-11-03-18:15';
+const EG2_VER = '3.5.9';
 try { console.log('%c灵犀 v' + EG2_VER + ' build ' + EG2_BUILD, 'color:#5b9dff;font-weight:bold'); } catch (e) {}
 
 /* ---------------- 🔐 界面缓存按账号隔离（2026-10-21）----------------
@@ -297,7 +297,23 @@ function goLogin() {
   location.href = '/static/login.html?next=' + encodeURIComponent(location.pathname);
 }
 
-const api = (p, opt) => fetch(p, opt).then(async (r) => {
+// ★ 2026-11-03：给所有接口调用加 25 秒超时 + 失败自动重试一次。
+//   服务偶尔会出现"连接还挂着但不返回"（Windows 上 asyncio 的老毛病），
+//   以前页面就永远停在占位文字上（"正在读取文件夹…"），现在会超时重试 ✓
+const api = (p, opt) => {
+  const once = (attempt) => {
+    const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    const to = ctrl ? setTimeout(() => ctrl.abort(), 12000) : null;
+    const o = Object.assign({}, opt || {});
+    if (ctrl) o.signal = ctrl.signal;
+    return fetch(p, o).then((r) => { if (to) clearTimeout(to); return r; },
+                             (e) => { if (to) clearTimeout(to); throw e; })
+      .catch((e) => {
+        if (attempt < 1) return once(attempt + 1);        // 重试一次
+        throw e;
+      });
+  };
+  return once(0).then(async (r) => {
   const t = await r.text();
   let j = null; try { j = JSON.parse(t); } catch (e) { j = { detail: t }; }
   if (!r.ok && r.status === 401 && j && j.need_login) {
@@ -318,8 +334,9 @@ const api = (p, opt) => fetch(p, opt).then(async (r) => {
     }
     throw new Error(why || t || ('HTTP ' + r.status));
   }
-  return j;
-});
+    return j;
+  });
+};
 const post = (p, b, m) => api(p, { method: m || 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(b || {}) });
 const CHAN_NAME = { semantic: '语义', literal: '文件名', face: '人脸',
@@ -476,12 +493,14 @@ function folderRowHtml(f, showFull) {
   //   服务器版上不用" ✓（服务器版这一行别多出个按钮让人误点）
   const showPathMap = window.__isBuilder !== false;
   return `
-    <div class="folder ${f.exists ? '' : 'missing'} ${selected.has(f.id) ? 'sel' : ''}"
+    <div class="folder ${(f.exists === null || f.exists === undefined) ? '' : (f.exists ? '' : 'missing')} ${selected.has(f.id) ? 'sel' : ''}"
          data-folder-id="${f.id}" data-folder-path="${esc(f.path)}">
       <input type="checkbox" data-pick="${f.id}" ${selected.has(f.id) ? 'checked' : ''}>
-      <span class="p" title="${esc(f.path)}">${esc(leaf)}${f.exists ? '' : (f.exists_reason === 'windows_path'
-        ? ' <span class="hint" title="这是建库机上的 Windows 路径，服务器上没有这个盘（不是故障）">· 本机路径</span>'
-        : ' ⚠ 目录不存在')}</span>
+      <span class="p" title="${esc(f.path)}">${esc(leaf)}${(f.exists === null || f.exists === undefined)
+        ? ' <span class="hint" title="还没检查。点上面的「🔄 重新检查目录」可以立刻确认">· 未检查</span>'
+        : (f.exists ? '' : (f.exists_reason === 'windows_path'
+          ? ' <span class="hint" title="这是建库机上的 Windows 路径，服务器上没有这个盘（不是故障）">· 本机路径</span>'
+          : ' ⚠ 目录不存在'))}</span>
       ${f.category
         ? `<span class="badge" data-cat-tag="${f.id}" title="用途：${esc(f.category_label || '')}（点「配置」可以重新分类）">${esc(f.category_icon || '')} ${esc(f.category_label || '')}</span>`
         : '<span class="badge" data-cat-tag="' + f.id + '" style="opacity:.5" title="还没归类（点「配置」可以选一个用途）">未分类</span>'}
@@ -3405,6 +3424,9 @@ async function refreshFolders() {
 let polling = null;
 let lastFinishedAt = null;
 
+// ★ 2026-11-03：挂到 window 上，切换标签页里的 window.refreshFolders 才能调到
+window.refreshFolders = refreshFolders;
+
 function markRunning(status) {
   document.querySelectorAll('[data-run]').forEach((el) => {
     const folder = (window.__folders || []).find((f) => f.id === +el.dataset.run);
@@ -5269,9 +5291,9 @@ function refreshTabData(name) {
     // 接口忙的时候要 2~5 秒，先给个占位，别让人以为「这一页是空的」
     const box = document.getElementById('folders');
     if (box && !box.innerHTML.trim()) box.innerHTML = '<div class="empty">正在读取文件夹…</div>';
-    call(window.refreshFolders); call(window.refreshNightBar);
+    call(refreshFolders); call(refreshNightBar);   // ★ 2026-11-03：这俩是本地函数，window 上没有（原来调空，占位文字永远不消失）
   }
-  if (name === 'kb') call(window.loadKbStatus);
+  if (name === 'kb') call(loadKbStatus);
 }
 
 function selectTab(name) {
@@ -6459,7 +6481,7 @@ $('#folders').onclick = async (ev) => {
   try {
     if (btn.dataset.act === 'remove') {
       // 项目主 2026-10-18：怕误点直接删 → 改成**两次确认** ✓
-      const f = (folders || []).find((x) => x.id === id) || {};
+      const f = currentFolders().find((x) => x.id === id) || {};
       if (!confirm(`要移除这个文件夹的索引吗？\n\n${f.path || ''}\n\n`
                    + '（磁盘上的文件不会被删除，但索引和片段会清掉）')) return;
       const word = '移除';
@@ -6580,7 +6602,11 @@ async function startIndex(payload, text) {
 /* ---------------- 文件夹配置（单个 / 批量） ---------------- */
 function openFolderConfig(targets) {
   const ids = Array.isArray(targets) ? targets : [targets];
-  const folders = window.__folders || [];
+  // ★ 2026-11-03：不要用加载时的快照。窗口变量可能还没写、或不是数组，
+//   直接 .find 就报 "is not a function"（项目主点「移除」时遇到的）✓
+function currentFolders() {
+  return Array.isArray(window.__folders) ? window.__folders : [];
+}
   cfgTargets = ids;
   $('#cfg-msg').textContent = '';
 

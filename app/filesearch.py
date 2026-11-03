@@ -43,6 +43,7 @@ from .model import EmbeddingEngine, InputError, decode_image
 from .searcher import Searcher
 from .store import Store, _from_blob
 
+_ERR_SUM_CACHE: list = [0.0, []]      # 异常汇总缓存：[时间戳, 结果行]
 log = logging.getLogger("eg2.filesearch")
 
 
@@ -1002,7 +1003,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         from starlette.concurrency import run_in_threadpool
         # 用显式函数包一层：多行推导式没法写成 lambda ✓
         def _list() -> list:
-            return [f for f in store.list_folders()
+            return [f for f in store.list_folders(check_exists=False)
                     if (vis is None or int(f["id"]) in vis)
                     and (wset is None or int(f["id"]) in wset)]
 
@@ -1029,12 +1030,13 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                 folder["exists_reason"] = ("windows_path"
                                            if (_win and not _can_index_here())
                                            else "missing")
+        # ★ 2026-11-03：这里必须用 stats_fast()（读缓存，毫秒级）。
+        #   用 store.stats() 会真去扫 68 万行，实测 70 秒 → 页面卡死 ✗
+        _st = store.stats_fast()
         return {
             "folders": folders,
-            # ★ 2026-10-21 项目主："用户登陆，这里不应该显示整站全局信息，
-            #   只能显示用户文件信息" → 统计按**他能读的文件夹**算 ✓
-            #   （管理员 vis 是 None → 仍是全站；看不到任何东西的人给全 0，不退化成全站 ✗）
-            "stats": store.stats(folder_ids=vis),            "schema": FC.KEYS,
+            "stats": _st,
+            "schema": FC.KEYS,
             "modes": [{"id": key, "label": label} for key, label in FC.MODE_LABELS.items()],
             # 类别清单也从后端给 ✓（定义只在 app/folderconf.py 一处 ✓）
             "categories": FC.categories_info(),
@@ -1338,10 +1340,23 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         """
         _need_login(request)
         vis = _visible_folders(request)
-        rows = store._query(                                  # noqa: SLF001
-            "SELECT f.folder_id AS fid, f.note AS note, COUNT(*) AS n, "
-            "MIN(f.name) AS sample FROM files f WHERE f.status='error' "
-            "GROUP BY f.folder_id, f.note ORDER BY f.folder_id, n DESC")
+        # ★ 2026-11-03：这条查询是全表 GROUP BY（68 万行）。原来直接在 async 里跑，
+        #   界面每次刷新文件夹都会调它 → 事件循环被堵几十秒，页面一直转
+        #   「正在读取文件夹…」、/health 都超时 ✗
+        #   现在：丢线程池 + 结果缓存 30 秒 ✓
+        import time as _time
+        from starlette.concurrency import run_in_threadpool
+        cache = _ERR_SUM_CACHE
+        if cache[0] and _time.time() - cache[0] < 30:
+            rows = cache[1]
+        else:
+            rows = await run_in_threadpool(
+                lambda: store._query(                          # noqa: SLF001
+                    "SELECT f.folder_id AS fid, f.note AS note, COUNT(*) AS n, "
+                    "MIN(f.name) AS sample FROM files f WHERE f.status='error' "
+                    "GROUP BY f.folder_id, f.note ORDER BY f.folder_id, n DESC"))
+            _ERR_SUM_CACHE[0] = _time.time()
+            _ERR_SUM_CACHE[1] = rows
         out: dict = {}
         for r in rows:
             fid = int(r["fid"])
@@ -3062,7 +3077,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         #   直接放在 async 里会把事件循环堵死 → /health 都超时 ✗
         #   丢线程池跑，页面与监控始终可用 ✓
         from starlette.concurrency import run_in_threadpool
-        stats = await run_in_threadpool(store.stats)
+        stats = store.stats_fast()
         return {"status": indexer.status(), "stats": stats}
 
     # ---------------------------------------------------------- 搜索

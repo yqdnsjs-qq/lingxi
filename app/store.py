@@ -762,25 +762,72 @@ class Store:
         item["config"] = _loads(item.get("config"))
         return item
 
-    def list_folders(self, stats: bool = True) -> list[dict[str, Any]]:
+    def list_folders(self, stats: bool = True,
+                     check_exists: bool = True) -> list[dict[str, Any]]:
+        """列出文件夹。
+
+        `check_exists=False`：**不碰网络盘**，只用已知缓存（未知就是 None）。
+        ★ 2026-11-03：界面一打开就调这个接口，以前它对每个文件夹都做
+          `os.path.isdir`；NAS 卡一下就要几秒，页面就一直转「正在读取文件夹…」✗
+          现在首屏一律走缓存，真正的检查交给「🔄 重新检查目录」✓
+        """
         if stats:
-            rows = self._query(
-                "SELECT f.*, "
-                "(SELECT COUNT(*) FROM files x WHERE x.folder_id=f.id) AS files, "
-                "(SELECT COUNT(*) FROM files x WHERE x.folder_id=f.id "
-                " AND x.status='error') AS errors, "
-                "(SELECT COUNT(*) FROM chunks c JOIN files x ON x.id=c.file_id "
-                " WHERE x.folder_id=f.id) AS chunks "
-                "FROM folders f ORDER BY f.added_at"
-            )
+            # ★ 2026-11-03：原来是"每个文件夹 3 个关联子查询"，68 万文件 / 2.3GB 的库上
+            #   实测 /api/folders 要 70~80 秒 → 页面一直转「正在读取文件夹…」✗
+            #   改成：一次 GROUP BY 拿全部计数（再缓存 30 秒），毫秒级 ✓
+            rows = self._query("SELECT * FROM folders ORDER BY added_at")
+            cached = getattr(self, "_folder_counts", None)
+            _now = time.time()
+            if cached and _now - cached[0] < 30:
+                fmap, cmap = cached[1], cached[2]
+            else:
+                # ★ 2026-11-03：先从 meta 里读上次算好的（重启后首屏也不用等）✓
+                try:
+                    raw = self.get_meta("folder_counts_json")
+                    if raw:
+                        saved = json.loads(raw)
+                        fmap = {int(k): tuple(v) for k, v in (saved.get("f") or {}).items()}
+                        cmap = {int(k): int(v) for k, v in (saved.get("c") or {}).items()}
+                        self._folder_counts = (_now, fmap, cmap)
+                        rows_ready = True
+                    else:
+                        rows_ready = False
+                except Exception:                                # noqa: BLE001
+                    rows_ready = False
+                if not rows_ready:
+                    fmap = {int(r["folder_id"]): (int(r["c"]), int(r["e"]))
+                            for r in self._query(
+                                "SELECT folder_id, COUNT(*) AS c, "
+                                "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS e "
+                                "FROM files GROUP BY folder_id")}
+                    cmap = {int(r["folder_id"]): int(r["c"]) for r in self._query(
+                        "SELECT x.folder_id AS folder_id, COUNT(*) AS c "
+                        "FROM chunks c JOIN files x ON x.id=c.file_id GROUP BY x.folder_id")}
+                    self._folder_counts = (_now, fmap, cmap)
+                    try:
+                        self.set_meta("folder_counts_json", json.dumps(
+                            {"f": {str(k): list(v) for k, v in fmap.items()},
+                             "c": {str(k): v for k, v in cmap.items()}}))
+                    except Exception:                            # noqa: BLE001
+                        pass
         else:
             rows = self._query("SELECT * FROM folders f ORDER BY f.added_at")
+            fmap, cmap = {}, {}
         out = []
         for row in rows:
             item = dict(row)
+            if stats:
+                _f, _e = fmap.get(int(item["id"]), (0, 0))
+                item["files"] = int(_f)
+                item["errors"] = int(_e)
+                item["chunks"] = int(cmap.get(int(item["id"]), 0))
             item["config"] = _loads(item.get("config"))
             try:
-                item["exists"] = path_exists_cached(str(row["path"]))
+                if check_exists:
+                    item["exists"] = path_exists_cached(str(row["path"]))
+                else:
+                    hit = _exists_cache.get(str(row["path"]))
+                    item["exists"] = None if hit is None else bool(hit[1])
             except OSError:
                 item["exists"] = False
             out.append(item)
@@ -1028,6 +1075,47 @@ class Store:
             self._conn.commit()
 
     # ------------------------------------------------------------ 统计
+    def warm_stats(self) -> None:
+        """后台预热统计缓存（全站口径）。界面请求就只读缓存，不再等聚合查询 ✓"""
+        try:
+            self.stats(None)
+        except Exception:                                        # noqa: BLE001
+            pass
+
+    def warm_stats_json(self) -> dict[str, Any]:
+        """算一次全站统计，存到 meta + 内存（后台线程调用）✓"""
+        try:
+            data = self.stats(None)
+        except Exception:                                        # noqa: BLE001
+            return {}
+        self._stats_mem = data
+        try:
+            self.set_meta("stats_json", json.dumps(data, ensure_ascii=False))
+        except Exception:                                        # noqa: BLE001
+            pass
+        return data
+
+    def stats_fast(self) -> dict[str, Any]:
+        """**永不查询**的统计：内存 → meta → 全 0（毫秒级）✓
+
+        ★ 2026-11-03：界面一打开就要统计，而这个库上真算一次要 25~70 秒。
+          先给上次的结果（最多差 90 秒），后台线程负责刷新。
+        """
+        mem = getattr(self, "_stats_mem", None)
+        if mem:
+            return dict(mem)
+        try:
+            raw = self.get_meta("stats_json")
+            if raw:
+                data = json.loads(raw)
+                self._stats_mem = data
+                return dict(data)
+        except Exception:                                        # noqa: BLE001
+            pass
+        return {"files": 0, "chunks": 0, "errors": 0, "bytes": 0,
+                "kinds": {}, "dim": self.get_meta("dim"),
+                "scoped": False, "warming": True}
+
     def stats(self, folder_ids: list[int] | None = None) -> dict[str, Any]:
         """索引统计。
 

@@ -786,6 +786,23 @@ def main() -> int:
                 log.warning("预热文件夹缓存失败（不影响使用）：%s", exc)
 
         threading.Thread(target=_warm_exists, daemon=True).start()
+
+        # ★ 2026-11-03：统计也后台预热。stats() 要扫 68 万行 / 2.3GB，
+        #   冷缓存时 25~35 秒；界面一打开就调 /api/folders → 页面转半天 ✗
+        #   这里每 45 秒替它算好，接口只读缓存（毫秒级）✓
+        def _warm_stats() -> None:
+            # ★ 2026-11-03：统计只在这里算（25~70 秒），界面永远读缓存 ✓
+            while True:
+                try:
+                    # 先算「每个文件夹有多少文件」（0.2 秒级），首屏立刻可用 ✓
+                    store.list_folders(stats=True, check_exists=False)
+                    # 再算全站统计（25~70 秒），界面读缓存，不等它 ✓
+                    store.warm_stats_json()
+                except Exception:                                # noqa: BLE001
+                    pass
+                time.sleep(300)
+
+        threading.Thread(target=_warm_stats, daemon=True).start()
     except Exception:  # noqa: BLE001
         log.exception("索引库初始化失败，文件搜索可能不可用")
     try:
@@ -833,6 +850,10 @@ def main() -> int:
         log_level="info",
         access_log=False,
         timeout_graceful_shutdown=5,
+        # ★ 2026-11-03：默认 5 秒就断开空闲连接，浏览器的连接池还攥着那些连接不放，
+        #   下一次请求会发到"已死"的连接上 —— 实测一次要等 11 秒才自动重试成功 ✗
+        #   （就是"切到文件夹页半天不出来"的真凶之一）。放到 75 秒，浏览器空闲期也够 ✓
+        timeout_keep_alive=75,
         loop="asyncio",          # 明确就用 asyncio 的策略（不要让 uvicorn 自己挑 auto）✓
     )
     server = uvicorn.Server(config)
