@@ -382,6 +382,23 @@ _NIGHT: dict = {"running": False, "note": "", "started": 0.0}
 def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: Indexer) -> APIRouter:
     router = APIRouter()
     searcher = Searcher(cfg, store, engine)
+
+    # ★ 2026-11-03：冷启动第一次搜索要 60 秒（45 万条名字向量要读进内存），
+    #   用户会以为坏死了 ✗ → 建好路由就在后台热一次，第一次搜索就是秒级 ✓
+    def _warm_searcher() -> None:
+        try:
+            time.sleep(10)
+            searcher.search("预热", top_k=2)
+            log.info("检索缓存已预热")
+        except Exception as exc:                                 # noqa: BLE001
+            log.warning("检索预热失败（不影响使用）：%s", exc)
+
+    try:
+        threading.Thread(target=_warm_searcher, daemon=True,
+                         name="eg2-warm-search").start()
+    except Exception:                                            # noqa: BLE001
+        pass
+
     static_dir = Path(__file__).resolve().parent / "static"
 
     # 换库时把自己这两个引用一起换掉（原因见 app/dbreload.py 的模块说明：

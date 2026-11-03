@@ -1,7 +1,7 @@
 // 版本标记：F12 Console 里能看到，方便判断"你打开的是不是最新页面"
 // （改完前端一定要 Ctrl+F5 硬刷新，普通刷新有时还是旧 JS）
-const EG2_BUILD = '2026-11-03-18:15';
-const EG2_VER = '3.5.9';
+const EG2_BUILD = '2026-11-03-21:35';
+const EG2_VER = '3.5.10';
 try { console.log('%c灵犀 v' + EG2_VER + ' build ' + EG2_BUILD, 'color:#5b9dff;font-weight:bold'); } catch (e) {}
 
 /* ---------------- 🔐 界面缓存按账号隔离（2026-10-21）----------------
@@ -300,17 +300,25 @@ function goLogin() {
 // ★ 2026-11-03：给所有接口调用加 25 秒超时 + 失败自动重试一次。
 //   服务偶尔会出现"连接还挂着但不返回"（Windows 上 asyncio 的老毛病），
 //   以前页面就永远停在占位文字上（"正在读取文件夹…"），现在会超时重试 ✓
+// 慢接口（AI 检索/问答/OCR/索引）给 3 分钟，其它 30 秒
+const SLOW_API_PREFIX = ['/api/search', '/api/chat', '/api/ask', '/api/ocr',
+  '/api/index/start', '/api/backfill', '/api/kb', '/api/preview', '/api/recheck'];
 const api = (p, opt) => {
+  const slow = SLOW_API_PREFIX.some((s) => String(p).indexOf(s) === 0);
+  const timeout = slow ? 180000 : 30000;
   const once = (attempt) => {
     const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
-    const to = ctrl ? setTimeout(() => ctrl.abort(), 12000) : null;
+    const to = ctrl ? setTimeout(() => ctrl.abort(), timeout) : null;
     const o = Object.assign({}, opt || {});
     if (ctrl) o.signal = ctrl.signal;
     return fetch(p, o).then((r) => { if (to) clearTimeout(to); return r; },
                              (e) => { if (to) clearTimeout(to); throw e; })
       .catch((e) => {
-        if (attempt < 1) return once(attempt + 1);        // 重试一次
-        throw e;
+        const aborted = e && (e.name === 'AbortError' || /aborted/i.test(String(e)));
+        if (attempt < 1) return once(attempt + 1);        // 超时/断线 → 自动重试一次
+        // 不要把这个原始异常甩给界面（项目主看到的就是 "signal is aborted without reason"）
+        if (aborted) throw new Error('请求超时（' + Math.round(timeout / 1000) + ' 秒）：服务在忙或这一下响应慢，请再点一次');
+        throw new Error('连不上服务（' + (e && e.message ? e.message : '网络错误') + '），请确认灵犀还开着');
       });
   };
   return once(0).then(async (r) => {

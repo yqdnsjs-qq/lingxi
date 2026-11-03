@@ -803,6 +803,8 @@ def main() -> int:
                 time.sleep(300)
 
         threading.Thread(target=_warm_stats, daemon=True).start()
+
+        # （检索预热已放到 filesearch.create_router 里 —— searcher 只在那个作用域可见）
     except Exception:  # noqa: BLE001
         log.exception("索引库初始化失败，文件搜索可能不可用")
     try:
