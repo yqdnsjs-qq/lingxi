@@ -341,11 +341,24 @@ def _com_select(target: str) -> str:
     return box.get("err", "")
 
 
+_DIAG_CACHE: tuple[float, dict] | None = None
+
+
 def diagnose() -> dict:
-    """把影响桌面交互的环境因素都列出来，方便排错。"""
+    """把影响桌面交互的环境因素都列出来，方便排错。
+
+    ★ 2026-11-03：加 60 秒缓存。`/health` 每次都调它，而它要反复
+      `ctypes.WinDLL(...)` 加载系统库；索引跑满时这些调用会把健康检查拖到超时 ✗
+      这些信息（完整性级别、资源管理器在不在）一分钟内不会变 ✓
+    """
+    global _DIAG_CACHE
+    now = time.time()
+    if _DIAG_CACHE is not None and now - _DIAG_CACHE[0] < 60:
+        return dict(_DIAG_CACHE[1])
+
     level = integrity_level()
     shell = shell_running() if _IS_WINDOWS else True
-    return {
+    out = {
         "platform": sys.platform,
         "elevated": is_elevated(),
         "integrity": level,
@@ -354,6 +367,8 @@ def diagnose() -> dict:
             level in ("Medium", "Medium Plus", "High") and shell),
         "session": os.environ.get("SESSIONNAME", ""),
     }
+    _DIAG_CACHE = (now, dict(out))
+    return out
 
 
 def failure_hint(problem: str) -> str:

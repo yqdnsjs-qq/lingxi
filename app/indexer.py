@@ -176,6 +176,16 @@ class Indexer:
         source = fcfg or self.cfg
         ignore = source.ignore_dirs
         skip_ext = source.skip_ext
+        # ★ 2026-11-03：仅文件名模式**不该**按扩展名跳过。
+        #   实测「软件」「系统」两个共享里 .exe / .rar / .zip 一个都没入库 ✗
+        #   （skip_ext 里有 .exe/.dll/.zip/.rar/.iso…）——而这些恰恰是最想按名字搜到的东西。
+        #   纯登记名字，不读内容，没有任何理由跳 ✓
+        try:
+            _mode = (source.summary() or {}).get("mode") if hasattr(source, "summary") else ""
+        except Exception:                                        # noqa: BLE001
+            _mode = ""
+        if _mode == "name_only":
+            skip_ext = set()
         use_cache = dir_cache is not None and bool(getattr(source, "fast_scan", False))
         stack = [root]
         while stack:
