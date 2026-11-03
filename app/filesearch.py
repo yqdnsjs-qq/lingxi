@@ -160,6 +160,17 @@ def _open_path(path: Path, reveal: bool) -> str:
     if not os.path.exists(target):
         raise HTTPException(status_code=404, detail=f"文件不存在或无法访问：{path}")
 
+    # ★ 2026-11-03：服务器（Linux）没有桌面环境，xdg-open 根本不存在，
+    #   点「定位/打开」会直接 500，看着像坏了 ✗
+    #   这类情况给一句人话 + 真实路径，让人用「预览」或复制路径 ✓
+    try:
+        from . import serverpath as _sp
+        if _sp.is_server():
+            return (f"服务器版没有桌面环境，无法在这里打开文件管理器；"
+                    f"已确认文件可读（{target}）。请用「预览」查看，或复制这个路径去服务器上操作。")
+    except Exception:                                            # noqa: BLE001
+        pass
+
     if reveal:
         problem = desktop.reveal_in_explorer(target)
         if not problem:

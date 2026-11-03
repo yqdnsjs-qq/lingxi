@@ -111,6 +111,12 @@ CREATE TABLE IF NOT EXISTS files(
 );
 CREATE INDEX IF NOT EXISTS idx_files_folder ON files(folder_id);
 CREATE INDEX IF NOT EXISTS idx_files_name ON files(name);
+-- ★ 2026-11-03：这三个是「统计/搜索提速」需要的覆盖索引。
+--   没有它们，SUM(size) / GROUP BY kind / status='error' 要扫整张表（含名字向量 BLOB），几十秒 ✗
+--   建立时会花 20~40 秒（一次性），之后一劳永逸 ✓
+CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
+CREATE INDEX IF NOT EXISTS idx_files_size ON files(size);
+CREATE INDEX IF NOT EXISTS idx_files_kind ON files(kind);
 
 CREATE TABLE IF NOT EXISTS chat_conversation(
   id          INTEGER PRIMARY KEY AUTOINCREMENT,

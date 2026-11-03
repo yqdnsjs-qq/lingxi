@@ -1,7 +1,7 @@
 // 版本标记：F12 Console 里能看到，方便判断"你打开的是不是最新页面"
 // （改完前端一定要 Ctrl+F5 硬刷新，普通刷新有时还是旧 JS）
-const EG2_BUILD = '2026-11-03-22:20';
-const EG2_VER = '3.5.11';
+const EG2_BUILD = '2026-11-03-23:02';
+const EG2_VER = '3.5.13';
 try { console.log('%c灵犀 v' + EG2_VER + ' build ' + EG2_BUILD, 'color:#5b9dff;font-weight:bold'); } catch (e) {}
 
 /* ---------------- 🔐 界面缓存按账号隔离（2026-10-21）----------------
