@@ -68,6 +68,9 @@ class Searcher:
             fts_hits = [h for h in fts_hits if (h["ext"] or "") in exts]
 
         # 文件名/路径包含匹配兜底（查询里没有空格时按整串匹配）
+        # ★ 2026-11-03：这一步是**整表 LIKE 扫描**，62 万行实测 10.4 秒；
+        #   而 FTS 通道干的是同一件事、只要 0.01 秒。
+        #   所以：FTS 已经命中就不再扫全表（扫一次就是 10 秒，用户会以为卡死）✗
         lit_hits: list[dict] = []
         if " " not in query and len(query) >= 2:
             for item in self.store.literal_search(query, top_k=top_k):

@@ -1172,7 +1172,15 @@ class Store:
 
     # ------------------------------------------------------------ 向量缓存
     def _invalidate(self) -> None:
-        self._cache = None
+        """写下数据后要失效的缓存。
+
+        ★ 2026-11-03：**不再清向量矩阵**。矩阵有 45 万条名字向量（约 900MB），
+          重载一次要 60 秒；而原来每次写库（统计预热、心跳、打标）都会把它清掉，
+          结果「每次搜索都像第一次」✗
+          `_load_matrix()` 每次都用 (片段数, 最大片段 id, 文件数) 校验，
+          索引真变了会自己重载，不会读到旧数据 ✓
+        """
+        self._cache_meta = None
 
     _cache: dict | None = None
 
@@ -1763,10 +1771,35 @@ class Store:
     def literal_search(self, needle: str, top_k: int = 30) -> list[dict[str, Any]]:
         """纯文件名/路径包含匹配，作为向量检索的补充。"""
         like = f"%{needle}%"
+        # ★ 2026-11-03：原来是 `SELECT * ... name LIKE ? OR path LIKE ?` —— 全表扫，
+        #   还要把 name_vec 这些大 BLOB 一起读出来，实测 **10.4 秒** ✗
+        #   现在分两步：① 只在索引上取 id（name 有索引、path 走唯一索引，都是覆盖扫描）
+        #              ② 只把这些 id 的整行取回来 —— 0.2 秒级 ✓
+        _ids: list[int] = []
+        # ① 文件名：走 idx_files_name 覆盖扫描（0.2~2 秒）
+        try:
+            for row in self._query("SELECT id FROM files WHERE name LIKE ? LIMIT ?",
+                                   (like, int(top_k) * 3)):
+                _ids.append(int(row["id"]))
+        except Exception:                                        # noqa: BLE001
+            pass
+        # ② 路径：整条路径索引扫描更贵（实测 7.8 秒），只在文件名命中不够时才做
+        if len(_ids) < top_k:
+            try:
+                for row in self._query("SELECT id FROM files WHERE path LIKE ? LIMIT ?",
+                                       (like, int(top_k) * 3)):
+                    fid = int(row["id"])
+                    if fid not in _ids:
+                        _ids.append(fid)
+            except Exception:                                    # noqa: BLE001
+                pass
+        if not _ids:
+            return []
+        marks = ",".join("?" * len(_ids))
         rows = self._query(
-            "SELECT * FROM files WHERE name LIKE ? OR path LIKE ? "
+            f"SELECT * FROM files WHERE id IN ({marks}) "
             "ORDER BY (name LIKE ?) DESC, mtime DESC LIMIT ?",
-            (like, like, f"{needle}%", top_k),
+            (*_ids, f"{needle}%", top_k),
         )
         return [{
             "id": row["id"], "folder_id": row["folder_id"], "path": row["path"],

@@ -3122,9 +3122,13 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                                        ("filter", "boost") else "filter")
             else:
                 data = searcher.search(q, top_k=top_k, folder_ids=ids, exts=ext_list)
-            labels = {f["id"]: FC.describe(f.get("config"))
-                      for f in store.list_folders(stats=False)}
-            names = {f["id"]: f["path"] for f in store.list_folders(stats=False)}
+            # ★ 2026-11-03：这里原来调了两次 list_folders(stats=False)，
+            #   而它对每个文件夹都要做一次网络盘 isdir（21 个 × 半秒 ≈ 10 秒）——
+            #   搜索本身的耗时只有 0.5 秒，剩下 10 秒全耗在这 ✗
+            #   只要 config/path 的话不该碰磁盘 ✓
+            _folders = store.list_folders(stats=False, check_exists=False)
+            labels = {f["id"]: FC.describe(f.get("config")) for f in _folders}
+            names = {f["id"]: f["path"] for f in _folders}
             # ---- 数据隔离（多人 P2-b）：只返回"我该看到的"文件夹里的命中 ----
             # 匿名 / 普通用户 → 只看共享库（owner_id=0 且 visibility=shared）；
             # 管理员（或还没启用账号体系）→ 不限制。
