@@ -277,6 +277,11 @@ def _from_blob(blob: bytes) -> np.ndarray:
     return np.frombuffer(blob, dtype=np.float32)
 
 
+# 搜索结果要展示的列（**不含 name_vec**：那是 900 MB 的向量 BLOB，检索时白读）
+_FILE_COLS = ("id, folder_id, path, name, dir, ext, kind, size, mtime, "
+              "status, note, n_chunks")
+
+
 def _slice_normalize(vector: np.ndarray, dim: int) -> np.ndarray | None:
     """取前 dim 维并重新归一化——这正是 Matryoshka 截断的定义。"""
     if dim <= 0 or dim > vector.shape[0]:
@@ -317,8 +322,47 @@ class Store:
         except Exception as exc:                                  # noqa: BLE001
             log.warning("FTS5 通道初始化失败（不影响启动）：%s", exc)
             self.fts_state = {"ok": False, "error": str(exc)}
+        # 文件名 / 目录的 FTS5 通道（3.5.14）：建表是毫秒级；
+        # 需要全量重建（62 万条约 25 秒）时丢到**后台线程**，不挡启动也不挡搜索 ——
+        # 没建好之前 literal_search 自动退回老的 LIKE 路径 ✓
+        self.name_fts_state = {"ok": False, "reason": "还没初始化"}
+        try:
+            from . import namefts as _nfts                        # noqa: PLC0415
+
+            _nfts.create(self._conn)
+            bad, why = _nfts.need_rebuild(self._conn)
+            if bad:
+                self.name_fts_state = {"ok": False, "reason": why}
+                threading.Thread(target=self._build_name_fts_bg,
+                                 name="name-fts-build", daemon=True).start()
+            else:
+                self.name_fts_state = {"ok": True, "rows": _nfts.count(self._conn),
+                                       "files": _nfts.files_count(self._conn)}
+        except Exception as exc:                                  # noqa: BLE001
+            log.warning("文件名 FTS 通道初始化失败（检索退回 LIKE）：%s", exc)
+            self.name_fts_state = {"ok": False, "error": str(exc)}
 
     fts_state: dict = {"ok": False, "error": "还没初始化"}
+    name_fts_state: dict = {"ok": False, "reason": "还没初始化"}
+
+    def _build_name_fts_bg(self) -> None:
+        """后台全量重建文件名 FTS（用**独立连接**，不跟请求抢 Store 的锁）✓"""
+        try:
+            from . import namefts as _nfts                        # noqa: PLC0415
+
+            con = sqlite3.connect(str(self.path), timeout=120)
+            con.row_factory = sqlite3.Row
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("PRAGMA synchronous=NORMAL")
+            try:
+                got = _nfts.ensure(con, verbose=True)
+            finally:
+                con.close()
+            self.name_fts_state = dict(got)
+            log.info("文件名 FTS 就绪：%s", got)
+        except Exception as exc:                                  # noqa: BLE001
+            log.warning("文件名 FTS 后台重建失败（检索退回 LIKE）：%s", exc)
+            self.name_fts_state = {"ok": False, "error": str(exc)}
 
     # ------------------------------------------------------------ 基础
     def ensure_caption_skip(self) -> None:
@@ -704,6 +748,9 @@ class Store:
     def reset(self) -> None:
         with self._lock:
             self._conn.executescript("DELETE FROM chunks; DELETE FROM files;")
+            if self.name_fts_state.get("ok"):
+                from . import namefts as _nfts                    # noqa: PLC0415
+                _nfts.clear(self._conn)
             self._conn.commit()
         self._invalidate()
 
@@ -845,6 +892,9 @@ class Store:
             if ids:
                 marks = ",".join("?" * len(ids))
                 self._conn.execute(f"DELETE FROM chunks WHERE file_id IN ({marks})", ids)
+                if self.name_fts_state.get("ok"):
+                    from . import namefts as _nfts                # noqa: PLC0415
+                    _nfts.delete_ids(self._conn, ids)
             self._conn.execute("DELETE FROM files WHERE folder_id=?", (folder_id,))
             self._conn.execute("DELETE FROM folders WHERE id=?", (folder_id,))
             self._conn.commit()
@@ -977,6 +1027,12 @@ class Store:
                      size, mtime, kind, now, note),
                 )
                 file_id = int(cur.lastrowid)
+            # 文件名 FTS 通道跟着同步（3.5.14）：单条插入是微秒级，跑批时同一个事务 ✓
+            # 改名/挪目录也走这里（INSERT OR REPLACE 按 rowid 覆盖）✓
+            if self.name_fts_state.get("ok"):
+                from . import namefts as _nfts                    # noqa: PLC0415
+
+                _nfts.upsert(self._conn, file_id, path.name, str(path.parent))
             # ★ 2026-11-03：批量期间不逐条提交。原来这里无视 _batching，
             #   每个文件一次 fsync，实测只有 30 条/秒 —— 53 万文件要 5 小时 ✗
             if not getattr(self, "_batching", False):
@@ -1011,6 +1067,9 @@ class Store:
                     idmarks = ",".join("?" * len(ids))
                     self._conn.execute(f"DELETE FROM chunks WHERE file_id IN ({idmarks})", ids)
                     self._conn.execute(f"DELETE FROM files WHERE id IN ({idmarks})", ids)
+                    if self.name_fts_state.get("ok"):
+                        from . import namefts as _nfts            # noqa: PLC0415
+                        _nfts.delete_ids(self._conn, ids)
                     total += len(ids)
             self._conn.commit()
         self._invalidate()
@@ -1187,6 +1246,8 @@ class Store:
           索引真变了会自己重载，不会读到旧数据 ✓
         """
         self._cache_meta = None
+        # 自己写过库 → 「矩阵是否过期」的 3 秒缓存也要立刻作废（否则新数据 3 秒内搜不到）✓
+        self._ver_cache = None
 
     _cache: dict | None = None
 
@@ -1196,11 +1257,22 @@ class Store:
         不同文件夹可以选不同的向量维度。Matryoshka 表示下「取前 d 维再重新归一化」
         就等于该维度本身的结果，所以只需把查询向量按各分组的维度切片，跨维度也能一起比。
         """
-        version = self._query(
-            "SELECT (SELECT COUNT(*) FROM chunks) AS c, "
-            "(SELECT COALESCE(MAX(id),0) FROM chunks) AS m, "
-            "(SELECT COUNT(*) FROM files) AS f")[0]
-        key = (version["c"], version["m"], version["f"])
+        # ★ 2026-11-04：过期判断（3 个 COUNT）在 62 万行 / 2.3 GB 的库上要 0.13~0.49 秒，
+        #   而**每次搜索都要先跑一遍** —— 这比矩阵乘法本身还贵 ✗
+        #   改成最多 3 秒查一次：连续几次搜索只有第一次付这笔钱；
+        #   自己写库（upsert/删除/加片段）会走 _invalidate() 立刻清掉，不会读到旧矩阵 ✓
+        #   外部进程直接改库时最多滞后 3 秒（可接受）。
+        now = time.time()
+        vcache = getattr(self, "_ver_cache", None)
+        if vcache and now - vcache[0] < 3.0:
+            key = vcache[1]
+        else:
+            version = self._query(
+                "SELECT (SELECT COUNT(*) FROM chunks) AS c, "
+                "(SELECT COALESCE(MAX(id),0) FROM chunks) AS m, "
+                "(SELECT COUNT(*) FROM files) AS f")[0]
+            key = (version["c"], version["m"], version["f"])
+            self._ver_cache = (now, key)
         cache = self._cache
         if cache and cache["key"] == key:
             return cache
@@ -1292,13 +1364,24 @@ class Store:
         if not scores:
             return []
 
+        # ★ 2026-11-04：先按分数裁一刀再取整行。候选来自「片段 top_k*40 + 名字 top_k*20」，
+        #   最多 1800 个文件 id，而**整行取回**（哪怕已去掉 name_vec）在 2.3 GB 的库上
+        #   就要 0.25~0.5 秒 ✗ —— 最后也只用前 top_k 条。
+        #   带文件夹/后缀过滤时多留一些，免得筛完不够数。
+        cap = max(top_k * (12 if (folder_ids or exts) else 6), 60)
+        if len(scores) > cap:
+            kept = sorted(scores.items(), key=lambda kv: -kv[1][0])[:cap]
+            scores = dict(kept)
         file_ids = list(scores.keys())
         placeholders = ",".join("?" * len(file_ids))
+        # ★ 2026-11-04：只取展示要用的列，**不要把 name_vec 那 900 MB 的 BLOB 拖出来**
+        #   （原来 SELECT *，1500 个候选就是 1500×3 KB 的向量白读一遍）
         meta = {row["id"]: row for row in self._query(
-            f"SELECT * FROM files WHERE id IN ({placeholders})", file_ids)}
+            f"SELECT {_FILE_COLS} FROM files WHERE id IN ({placeholders})", file_ids)}
 
         needle = literal.strip().lower()
         results: list[dict[str, Any]] = []
+        chunk_of: dict[int, int] = {}
         for fid, (score, chunk_id) in scores.items():
             row = meta.get(fid)
             if row is None:
@@ -1316,10 +1399,8 @@ class Store:
                     score += 0.15
                 elif all(tok in path_lower for tok in needle.split() if tok):
                     score += 0.10
-            snippet = ""
             if chunk_id is not None:
-                got = self._query("SELECT text FROM chunks WHERE id=?", (chunk_id,))
-                snippet = got[0]["text"] if got else ""
+                chunk_of[fid] = int(chunk_id)
             results.append({
                 "id": fid,
                 "folder_id": row["folder_id"],
@@ -1334,11 +1415,23 @@ class Store:
                 "note": row["note"],
                 "n_chunks": row["n_chunks"],
                 "score": round(score, 4),
-                "snippet": (snippet or "")[:600],
+                "snippet": "",
             })
 
         results.sort(key=lambda item: -item["score"])
-        return results[:top_k]
+        results = results[:top_k]
+        # ★ 2026-11-04：片段正文**一次批量取**（原来每条命中单独查一次 ——
+        #   实测 1613 次查询、0.87 秒，占整个语义搜索的 2/3 ✗）；而且只取最终返回的这几条 ✓
+        want = [chunk_of[r["id"]] for r in results if r["id"] in chunk_of]
+        if want:
+            marks = ",".join("?" * len(want))
+            texts = {int(row["id"]): row["text"] for row in self._query(
+                f"SELECT id, text FROM chunks WHERE id IN ({marks})", want)}
+            for item in results:
+                got = texts.get(chunk_of.get(item["id"], -1))
+                if got:
+                    item["snippet"] = got[:600]
+        return results
 
     # ================= 人脸 / 人物 =================
     def clear_file_faces(self, file_id: int) -> None:
@@ -1775,7 +1868,17 @@ class Store:
         return out[:top_k]
 
     def literal_search(self, needle: str, top_k: int = 30) -> list[dict[str, Any]]:
-        """纯文件名/路径包含匹配，作为向量检索的补充。"""
+        """文件名/路径包含匹配，作为向量检索的补充。
+
+        ★ 3.5.14：**优先走文件名 FTS5 通道**（`app/namefts.py`）：
+          同样是子串语义，实测 **5~20 ms**（老 LIKE 扫 62 万行要 0.2~2 秒，
+          扫路径更贵 7.8 秒），而且目录命中也能一并召回 ✓
+          通道没建好（首次升级正在后台重建 / 建表失败）时才退回老 LIKE 路径 ✓
+        """
+        if self.name_fts_state.get("ok"):
+            from . import namefts as _nfts                        # noqa: PLC0415
+
+            return _nfts.search(self._conn, needle, top_k=top_k)
         like = f"%{needle}%"
         # ★ 2026-11-03：原来是 `SELECT * ... name LIKE ? OR path LIKE ?` —— 全表扫，
         #   还要把 name_vec 这些大 BLOB 一起读出来，实测 **10.4 秒** ✗

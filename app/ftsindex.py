@@ -287,28 +287,44 @@ def search(con: sqlite3.Connection, q: str, limit: int = 60,
     seen: dict[int, dict] = {}
 
     def _run(match_expr: str, term: str) -> int:
-        sql = (f"SELECT c.rowid AS chunk_id, c.file_id, f.folder_id, c.kind, c.text, "
-               f"       bm25({FTS_TABLE}) AS rank "
-               f"  FROM {FTS_TABLE} "
-               f"  JOIN chunks c ON c.id = {FTS_TABLE}.rowid "
-               f"  JOIN files f ON f.id = c.file_id "
-               f" WHERE {FTS_TABLE} MATCH ? ")
-        args: list = [match_expr]
+        # ★ 2026-11-04：**两段式**。原来 FTS 表、chunks、files 三表 JOIN 再加
+        #   `ORDER BY bm25()`：凡是命中量大（"jpg" 命中 18 万片段）时就变成
+        #   "先 join 十八万行再排序"，实测 **2.6~13.5 秒** ✗
+        #   拆成：① 只在 FTS 表上按 bm25 取 id（0.1~0.2 秒）② 只取这些 id 的元数据 ✓
+        cap = int(max(1, min(limit, 500)))
+        over = min(cap * 3, 500)               # 多取一些，后面按文件夹/类型过滤可能筛掉几条
+        try:
+            hits = con.execute(
+                f"SELECT rowid AS chunk_id, bm25({FTS_TABLE}) AS rank "
+                f"  FROM {FTS_TABLE} WHERE {FTS_TABLE} MATCH ? "
+                f" ORDER BY rank LIMIT ?", (match_expr, over)).fetchall()
+        except sqlite3.Error as exc:
+            log.debug("FTS 查询失败：%s", exc)
+            return 0
+        if not hits:
+            return 0
+        ids = [int(h["chunk_id"]) for h in hits]
+        marks = ",".join("?" * len(ids))
+        sql = (f"SELECT c.id AS chunk_id, c.file_id, f.folder_id, c.kind, c.text "
+               f"  FROM chunks c JOIN files f ON f.id = c.file_id "
+               f" WHERE c.id IN ({marks})")
+        args: list = list(ids)
         if folder_ids:
             sql += " AND f.folder_id IN (" + ",".join("?" * len(folder_ids)) + ")"
             args += [int(x) for x in folder_ids]
         if exclude_kinds:
             sql += " AND c.kind NOT IN (" + ",".join("?" * len(exclude_kinds)) + ")"
             args += list(exclude_kinds)
-        sql += " ORDER BY rank LIMIT ?"
-        args.append(int(max(1, min(limit, 500))))
         try:
-            rows = con.execute(sql, args).fetchall()
+            rows = {int(r["chunk_id"]): r for r in con.execute(sql, args).fetchall()}
         except sqlite3.Error as exc:
-            log.debug("FTS 查询失败：%s", exc)
+            log.debug("FTS 元数据查询失败：%s", exc)
             return 0
-        for r in rows:
-            rank = float(r["rank"] or 0)
+        for h in hits[:cap]:
+            r = rows.get(int(h["chunk_id"]))
+            if r is None:
+                continue
+            rank = float(h["rank"] or 0)
             # bm25 在 FTS5 里是**越小越相关**（负数），0~1 归一化后越大越相关 ✓
             score = 1.0 / (1.0 + max(0.0, rank)) if rank >= 0 else min(1.0, -rank / 10.0)
             cid = int(r["chunk_id"])
@@ -330,8 +346,13 @@ def search(con: sqlite3.Connection, q: str, limit: int = 60,
     if _run(expr, q):                          # ① 整句先试（精确）
         out = list(seen.values())
     else:                                      # ② 拆词重试（召回）
-        for term in query_keywords(q)[:6]:
-            _run(query_expr(term), term)
+        # ★ 2026-11-04：**纯英文/数字的单个词不拆**。拆了只会得到 "comp"、"ompi"
+        #   这种 2~4 字碎片，每个都要跑一遍全库短语查询（实测一次 130~150 ms，
+        #   六轮就是 0.9 秒），命中还全是噪声 ✗ —— compiler_bisector 那种查询
+        #   光这一步就白花 1 秒。中文问句才需要拆（「方六是张三的什么人」）✓
+        if " " in (q or "").strip() or any(ord(c) > 0x2E80 for c in (q or "")):
+            for term in query_keywords(q)[:6]:
+                _run(query_expr(term), term)
         out = list(seen.values())
     out.sort(key=lambda r: (-int(r.get("hit_terms") or 1), -float(r.get("score") or 0)))
     return out[:int(max(1, min(limit, 500)))]

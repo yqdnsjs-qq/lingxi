@@ -96,6 +96,16 @@ def apply_remap(conn: sqlite3.Connection, old: str, new: str, style: str = "keep
         conn.execute(
             f"UPDATE files SET dir = ? || {tail} WHERE dir = ? OR dir LIKE ? OR dir LIKE ?",
             (new, old, like_bs, like_fs))
+    # ★ 2026-11-04：文件名/目录的 FTS5 通道里**存的是 dir 的切词结果**，
+    #   而这里行数不变（只改字符串）→ "数行数"查不出过期，得显式记一笔脏标记：
+    #   下次服务起来（或搜索前）会自动全量重建（62 万条约 3 分钟，后台线程）✓
+    try:
+        from . import namefts as _namefts                        # noqa: PLC0415
+
+        _namefts.mark_dirty(conn, f"remap {old} → {new}")
+        conn.commit()
+    except Exception:                                            # noqa: BLE001
+        pass                                                      # 老库没这张表也无所谓
     return int(n)
 
 
