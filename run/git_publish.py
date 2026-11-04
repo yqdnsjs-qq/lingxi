@@ -116,24 +116,59 @@ def is_text(p: Path) -> bool:
         ".gitignore", ".gitattributes", "AGENTS.md", "README.md")
 
 
+def _variants(old: str, new: str) -> list[tuple[str, str]]:
+    """一条规则 → 几种「写法变体」，都要替换。
+
+    2026-11-04 实锤：`docs/交接说明-多人版阶段0-20261020.md` 里有一条 JSON 例子，
+    本机路径写成了**双反斜杠**（每个反斜杠打两遍），而脱敏表里只有单反斜杠规则
+    → 这一处被漏掉、直接推上了公开仓库 ✗
+    （自检也没查出来：正则 `[\\\\/]` 只吃一个反斜杠。）
+    所以这里对含反斜杠的规则自动再生一份「转义写法」，替换值也照样转义 ✓
+    """
+    out = [(old, new)]
+    if "\\" in old:
+        esc_old, esc_new = old.replace("\\", "\\\\"), new.replace("\\", "\\\\")
+        if esc_old != old:
+            out.append((esc_old, esc_new))
+    return out
+
+
+def _read_any(p: Path) -> tuple[str, str] | None:
+    """读文本：先 UTF-8，读不动再用 GB18030（GBK 的超集）。
+
+    2026-11-04 实锤：仓库里 16 个 `.bat` 是 **GBK** 编码，旧的 `read_text(utf-8)`
+    直接抛 UnicodeDecodeError → 整文件跳过、等于没脱敏 ✗
+    （`换路径.bat` 里就留着一句 `\\\\NAS\\photo` 推上了公开仓库。）
+    返回 (文本, 编码)，写回时用同一个编码，连换行符都不动 ✓
+    """
+    raw = p.read_bytes()
+    for enc in ("utf-8", "gb18030"):
+        try:
+            return raw.decode(enc), enc
+        except UnicodeDecodeError:
+            continue
+    return None
+
+
 def scrub(dest: Path, pairs: list[tuple[str, str]]) -> tuple[int, dict[str, int]]:
     counts: dict[str, int] = {}
     changed = 0
     for p in dest.rglob("*"):
         if not p.is_file() or not is_text(p):
             continue
-        try:
-            t = p.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
+        got = _read_any(p)
+        if got is None:
             continue
+        t, enc = got
         orig = t
         for old, new in pairs:
-            c = t.count(old)
-            if c:
-                t = t.replace(old, new)
-                counts[old] = counts.get(old, 0) + c
+            for o, n in _variants(old, new):
+                c = t.count(o)
+                if c:
+                    t = t.replace(o, n)
+                    counts[old] = counts.get(old, 0) + c
         if t != orig:
-            p.write_text(t, encoding="utf-8", newline="")
+            p.write_bytes(t.encode(enc))
             changed += 1
     return changed, counts
 
@@ -143,10 +178,10 @@ def verify(dest: Path, must: list[str]) -> list[str]:
     for p in dest.rglob("*"):
         if not p.is_file() or not is_text(p):
             continue
-        try:
-            t = p.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
+        got = _read_any(p)          # GBK 的 .bat 也要查（旧版跳过了它们 ✗）
+        if got is None:
             continue
+        t = got[0]
         for pat in must:
             for m in re.finditer(pat, t):
                 line = t[:m.start()].count("\n") + 1
