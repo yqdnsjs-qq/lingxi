@@ -1747,6 +1747,14 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
             "mineru_api": _ocr.mineru_api_alive(),
             "oxr_api": _ocr.oxr_api_alive(),
             "mineru_api_url": _ocr._mineru_api(),      # noqa: SLF001
+            # ★ 2026-11-05：v4 按需启动、跑完即停；档位可改
+            "mineru4_api": _ocr.mineru4_api_alive(),   # noqa: SLF001
+            "mineru4_vlm": _ocr.mineru4_vlm_alive(),   # noqa: SLF001
+            "mineru4_api_url": _ocr._mineru4_api(),    # noqa: SLF001
+            "mineru4_vlm_url": _ocr._mineru4_vlm(),    # noqa: SLF001
+            "mineru4_tier": _ocr._mineru4_tier(),      # noqa: SLF001
+            "mineru4_ocr_mode": _ocr._mineru4_ocr_mode(),   # noqa: SLF001
+            "mineru4_autostop": _ocr._mineru4_autostop(),   # noqa: SLF001
             "oxr_api_url": (_ocr._ini_ocr().get("oxr_api")   # noqa: SLF001
                             or "http://127.0.0.1:8000"),
             "free_hint": _ocr.free_gpu_hint(),
@@ -1763,6 +1771,9 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                 "mineru_bridge": str(_ocr.ENGINES["mineru"]["bridge"]),
                 "mineru_dir": (_ocr._ini_ocr().get("mineru_dir")   # noqa: SLF001
                                 or os.environ.get("EG2_OCR_MINERU_DIR", "")),
+                "mineru4_python": str(_ocr.ENGINES["mineru4"]["python"]),
+                "mineru4_bridge": str(_ocr.ENGINES["mineru4"]["bridge"]),
+                "mineru4_dir": str(_ocr._mineru4_dir()),           # noqa: SLF001
                 "oxr_api": (_ocr._ini_ocr().get("oxr_api")      # noqa: SLF001
                             or "http://127.0.0.1:8000"),
                 "oxr_bridge": str(_ocr.ENGINES["oxr"]["bridge"]),
@@ -1824,11 +1835,30 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                 values["ocr_page_to"] = str(n)          # 0 = 到最后一页
             except (TypeError, ValueError):
                 warnings.append("结束页必须是非负整数（0 = 到最后一页）")
+        # ★ 2026-11-05：MinerU v4 的档位 / OCR 模式 / 用完即停
+        #   实测：basic 档还原表格，standard 档读竖排/古籍扫描件最准
+        if "mineru4_tier" in payload:
+            t = str(payload.get("mineru4_tier") or "").strip().lower()
+            if t in ("auto", "flash", "basic", "standard", "advanced"):
+                values["ocr_mineru4_tier"] = t
+            else:
+                warnings.append(f"不认识的 v4 档位 {t!r}"
+                                f"（auto/flash/basic/standard/advanced）")
+        if "mineru4_ocr_mode" in payload:
+            m = str(payload.get("mineru4_ocr_mode") or "").strip().lower()
+            if m in ("auto", "txt", "ocr"):
+                values["ocr_mineru4_ocr_mode"] = m
+            else:
+                warnings.append(f"不认识的 v4 OCR 模式 {m!r}（auto/txt/ocr）")
+        if "mineru4_autostop" in payload:
+            values["ocr_mineru4_autostop"] = "yes" if payload.get("mineru4_autostop") else "no"
         # ★ 2026-10-22：引擎路径（界面上填，存 config.ini 的 [ocr] 段）
         if isinstance(payload.get("paths"), dict):
             _VALID_KEYS = {"ppocr_python", "ppocr_bridge", "rapid_python",
                            "rapid_bridge", "mineru_python", "mineru_bridge",
-                           "mineru_dir", "oxr_api", "oxr_bridge"}
+                           "mineru_dir", "oxr_api", "oxr_bridge",
+                           "mineru4_python", "mineru4_bridge", "mineru4_dir",
+                           "mineru4_api", "mineru4_vlm"}
             for k, v in (payload.get("paths") or {}).items():
                 k = str(k).strip().lower()
                 if k not in _VALID_KEYS:

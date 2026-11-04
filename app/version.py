@@ -9,11 +9,22 @@
 """
 from __future__ import annotations
 
-VERSION = "3.5.14"
-BUILD = "2026-11-04-01:32"            # 前端 EG2_BUILD 用同一个值
+VERSION = "3.5.15"
+BUILD = "2026-11-05-01:22"            # 前端 EG2_BUILD 用同一个值
 
 # 最近几条（新的在前）；完整的看 docs/更新日志.md
 CHANGELOG: list[tuple[str, list[str]]] = [
+    ("3.5.15", [
+        "新：接入 MinerU v4（D:\\GJ\\MinerU\\v4），和 v3 并存、各走各的服务",
+        "v4 的用法：灵犀**按需启动**它的解析服务(:8100) + VLM(:8101)，"
+        "跑完立刻停掉、把约 4 GB 显存还回来（mineru4_autostop=yes）",
+        "档位自动兜底：先 basic（表格能还原成 Markdown 表格），"
+        "识别出的字太少再自动用 standard（竖排/古籍扫描件最准）重跑一遍",
+        "修 v3：启动脚本原来写死 `--host 0.0.0.0 --port 8000`（和 OXR 抢端口、还暴露到局域网）"
+        "→ 改成按配置只绑 127.0.0.1；停止时按配置端口找进程（原来写死 8000，8100 上永远停不掉）",
+        "修 v4 启动：直接起 mineru-api.exe 会去写 C:\\Users\\<你>\\.mineru 并报 WinError 5 "
+        "→ 起进程时带上它的便携环境（HOME/USERPROFILE/MINERU_HOME 指到 v4 目录）",
+    ]),
     ("3.5.14", [
         "提速：文件名搜索改走 FTS5 倒排（逐字切分 + 短语查询），"
         "原来「文件名/路径包含」是整表 LIKE 扫描（62 万行，0.2~2 秒，扫路径 7.8 秒）",

@@ -152,6 +152,74 @@ def _mineru_api() -> str:
             or "http://127.0.0.1:8000")
 
 
+# ---------------- MinerU 4.x（2026-11-05 新接，和 v3 并存）----------------
+def _mineru4_api() -> str:
+    """v4 解析服务的地址（它自己的默认是 8100，和 v3 的 8000 不冲突 ✓）。"""
+    return (_ini_ocr().get("mineru4_api") or os.environ.get("EG2_OCR_MINERU4_API")
+            or "http://127.0.0.1:8100")
+
+
+def _mineru4_vlm() -> str:
+    """v4 的 VLM 服务（llama.cpp + MinerU2.5 GGUF，standard/advanced 档要用）。"""
+    return (_ini_ocr().get("mineru4_vlm") or os.environ.get("EG2_OCR_MINERU4_VLM")
+            or "http://127.0.0.1:8101")
+
+
+def _mineru4_dir() -> Path:
+    return _p("EG2_OCR_MINERU4_DIR", "mineru4_dir", r"D:\GJ\MinerU\v4")
+
+
+def _mineru4_tier() -> str:
+    """默认档位。三档的实测脾气（2026-11-05，同一批样本）：
+
+    basic —— pipeline + 表格模型：**表格还原成 Markdown 表格** ✓，但竖排/古籍
+              扫描件几乎读不出字（同一页 basic 0 字 / standard 495 字）✗
+    standard —— VLM：竖排、繁体、扫描件最准 ✓，但**表格会变成图片占位** ✗
+    flash —— 最快，扫描件出乱码，不建议入库用
+
+    所以默认 **auto**：先 basic 保住表格，字太少自动再用 standard 跑一遍 ✓
+    """
+    v = (_ini_ocr().get("mineru4_tier")
+         or os.environ.get("EG2_OCR_MINERU4_TIER") or "auto").strip().lower()
+    return v if v in ("auto", "flash", "basic", "standard", "advanced") else "auto"
+
+
+def _mineru4_ocr_mode() -> str:
+    v = (_ini_ocr().get("mineru4_ocr_mode")
+         or os.environ.get("EG2_OCR_MINERU4_OCR_MODE") or "ocr").strip().lower()
+    return v if v in ("auto", "txt", "ocr") else "ocr"
+
+
+def _mineru4_autostop() -> bool:
+    """跑完是否**立刻停掉 v4 的两个服务**（项目主要求：用完即停、清显存）✓"""
+    v = (_ini_ocr().get("mineru4_autostop")
+         or os.environ.get("EG2_OCR_MINERU4_AUTOSTOP") or "yes").strip().lower()
+    return v in ("1", "yes", "true", "on")
+
+
+def _port_of(url: str, default: int) -> int:
+    """从 http://127.0.0.1:8100 里取端口（停止时按端口找 PID 要用）✓"""
+    try:
+        from urllib.parse import urlparse
+
+        got = urlparse(url if "//" in url else "//" + url).port
+        return int(got or default)
+    except Exception:                                            # noqa: BLE001
+        return default
+
+
+def _mineru4_args() -> list[str]:
+    """桥脚本参数（每次调用现算，界面上改了 tier 立刻生效 ✓）。
+
+    `auto` → 主档 basic + 兜底 standard（表格优先、读不出字再上 VLM）✓
+    """
+    tier = _mineru4_tier()
+    fallback = "standard" if tier == "auto" else ""
+    return ["--api", _mineru4_api(), "--tier", "basic" if tier == "auto" else tier,
+            "--fallback-tier", fallback,
+            "--ocr-mode", _mineru4_ocr_mode()]
+
+
 ENGINES: dict[str, dict] = {
     "ppocr": {
         "python": _p("EG2_OCR_PPOCR_PY", "ppocr_python",
@@ -187,7 +255,20 @@ ENGINES: dict[str, dict] = {
                      r"D:\GJ\MinerU\tools\submit_mineru_task.py"),
         # ★ 2026-11-02：地址改成可配。MinerU 默认也是 8000，会和 OXR 抢端口 ✗
         "args": ["--backend", "pipeline", "--api-url", _mineru_api()],
-        "label": "MinerU（结构化 Markdown + 自动提图，最强）",
+        "label": "MinerU v3（结构化 Markdown + 自动提图）",
+        "gpu": True,
+    },
+    "mineru4": {
+        # ★ 2026-11-05：v4 和 v3 **并存**，各自独立目录、独立服务。
+        #   v4 的优势（实测）：表格还原成 Markdown 表格、竖排古籍扫描件准确得多；
+        #   代价：要 :8100（解析）+ :8101（VLM）两个服务，常驻约 4 GB 显存，
+        #   所以默认**按需启动、跑完即停**（见 start_mineru4 / stop_mineru4）✓
+        "python": _p("EG2_OCR_MINERU4_PY", "mineru4_python",
+                     r"D:\GJ\MinerU\v4\runtime\python\python.exe"),
+        "bridge": _p("EG2_OCR_MINERU4_BRIDGE", "mineru4_bridge",
+                     str(ROOT / "run" / "ocr_bridges" / "mineru4_bridge.py")),
+        "args_fn": _mineru4_args,        # 每次调用现算（tier / ocr_mode 可改）
+        "label": "MinerU v4（表格 basic / 扫描件 standard，用完即停）",
         "gpu": True,
     },
     "oxr": {
@@ -211,8 +292,16 @@ def list_engines() -> list[dict]:
         ok = Path(spec["python"]).is_file() and Path(spec["bridge"]).is_file()
         item = {"id": name, "label": spec["label"], "available": ok, "gpu": spec["gpu"]}
         if name == "mineru":
-            item["note"] = "需要 MinerU 的 API 在运行（run-api.cmd）"
+            item["note"] = "需要 v3 的 API 在跑（_api8100.cmd，127.0.0.1:8100）"
             item["api_up"] = mineru_api_alive()
+        if name == "mineru4":
+            tier = _mineru4_tier()
+            item["note"] = (f"v4：按需启动、跑完即停；当前档位 {tier}"
+                            f"（表格用 basic、竖排扫描件用 standard）")
+            item["api_up"] = mineru4_api_alive()
+            item["vlm_up"] = mineru4_vlm_alive()
+            item["tier"] = tier
+            item["autostop"] = _mineru4_autostop()
         if name == "oxr":
             item["note"] = "需要 OXR 的三个服务在运行（1-启动 OXR.bat）"
             item["api_up"] = oxr_api_alive()
@@ -248,30 +337,207 @@ def mineru_api_alive(timeout: float = 3.0) -> bool:
         return False
 
 
+def _portable_env(root: Path, home: str = "portable-home") -> dict:
+    """复刻 MinerU 便携版的 portable-env*.cmd 里那套环境变量。
+
+    为什么要这份：v4 直接起会去用 `C:\\Users\\<你>\\.mineru` 建锁目录，
+    报 `[WinError 5] 拒绝访问`，解析任务全挂 ✗ —— 它必须把 HOME/USERPROFILE/
+    MINERU_HOME 都指到自己的便携目录里。
+
+    ★ 2026-11-05 踩坑：一开始用 `cmd /c "call portable-env-4.cmd && mineru-api.exe …"`
+      —— subprocess 传列表时会把整串再包一层引号，cmd 直接报
+      `'"…portable-env-4.cmd"' 不是内部或外部命令`，进程根本没起来、日志是空的 ✗
+      所以这里干脆不走 cmd，把变量算好直接塞给子进程 ✓
+    """
+    base = root / home
+    return {
+        **os.environ,
+        "MINERU_ROOT": str(root),
+        "USERPROFILE": str(base),
+        "HOME": str(base),
+        "APPDATA": str(base / "AppData" / "Roaming"),
+        "LOCALAPPDATA": str(base / "AppData" / "Local"),
+        "TEMP": str(base / "Temp"),
+        "TMP": str(base / "Temp"),
+        "MINERU_HOME": str(base),
+        "MINERU_CONFIG": str(base / "config.yaml"),
+        "HF_HOME": str(root / "models" / "huggingface"),
+        "HUGGINGFACE_HUB_CACHE": str(root / "models" / "huggingface" / "hub"),
+        "MODELSCOPE_CACHE": str(root / "models" / "modelscope"),
+        "PIP_CACHE_DIR": str(root / "downloads" / "pip-cache"),
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+    }
+
+
 def start_mineru_api(wait_seconds: int = 120) -> tuple[bool, str]:
-    """按需启动 MinerU 的 API（它的笔记里写着要先起 run-api.cmd）✓"""
+    """按需启动 v3 的 API。
+
+    ★ 2026-11-05 修：以前是 `start run-api.cmd`，而那个脚本写死了
+      `--host 0.0.0.0 --port 8000` —— ① 和 OXR 抢 8000 ② 绑 0.0.0.0 等于开到局域网,
+      而本项目实际用的是 8100（`_api8100.cmd`）。现在直接按**配置里的地址**起，
+      只用 127.0.0.1 ✓
+    """
     if mineru_api_alive():
         return True, "已经在跑"
+    api = _mineru_api()
+    port = _port_of(api, 8000)
     root = _p("EG2_OCR_MINERU_DIR", "mineru_dir", r"D:\GJ\MinerU")
-    cmd_file = root / "run-api.cmd"
-    if not cmd_file.is_file():
-        return False, f"找不到 {cmd_file}"
+    py = Path(ENGINES["mineru"]["python"])
+    if not py.is_file():
+        return False, f"找不到 v3 的 python：{py}"
+    log_dir = root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logf = open(log_dir / f"api{port}.log", "ab")                # noqa: SIM115
     try:
-        proc = subprocess.Popen(["cmd", "/c", "start", "/min", "run-api.cmd"],
-                         cwd=str(root), shell=False,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(
+            [str(py), "-m", "mineru.cli.fast_api",
+             "--host", "127.0.0.1", "--port", str(port)],
+            cwd=str(root), stdout=logf, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            env=_portable_env(root),
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
     except Exception as exc:                                     # noqa: BLE001
         return False, f"启动失败：{type(exc).__name__}: {exc}"
-    # 记下 PID（最稳的停止依据）；cmd /c start 起的可能是新窗口，
-    # 拿不到真正的 PID 也没关系，停止时会按端口再找一次 ✓
+    finally:
+        try:
+            logf.close()
+        except Exception:                                        # noqa: BLE001
+            pass
     global _mineru_started_pid
-    _mineru_started_pid = None
+    _mineru_started_pid = proc.pid
     t0 = time.time()
     while time.time() - t0 < wait_seconds:
-        time.sleep(5)
+        time.sleep(3)
         if mineru_api_alive():
-            return True, f"已就绪（等了 {time.time() - t0:.0f} 秒）"
-    return False, f"等了 {wait_seconds} 秒还没起来"
+            return True, f"已就绪（{time.time() - t0:.0f} 秒，127.0.0.1:{port}）"
+    return False, f"等了 {wait_seconds} 秒还没起来（看 {log_dir}\\api{port}.log）"
+
+
+# ---------------- MinerU 4.x 的起停（按需启动、用完即停）----------------
+def mineru4_api_alive(timeout: float = 3.0) -> bool:
+    """v4 的解析服务在跑吗。认 /v1/health，避免把 v3(.9)/OXR 认错 ✓"""
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(_mineru4_api().rstrip("/") + "/v1/health",
+                                    timeout=timeout) as r:
+            body = r.read(4096).decode("utf-8", "replace")
+        return '"status"' in body and '"ok"' in body
+    except Exception:                                            # noqa: BLE001
+        return False
+
+
+def mineru4_vlm_alive(timeout: float = 3.0) -> bool:
+    """VLM（llama.cpp）在跑吗。它只服务 standard/advanced 档，basic 档不依赖 ✓"""
+    import urllib.request
+
+    url = _mineru4_vlm().rstrip("/") + "/health"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return r.status < 500
+    except Exception:                                            # noqa: BLE001
+        return False
+
+
+def start_mineru4(wait_seconds: int = 180) -> tuple[bool, str]:
+    """按需启动 v4 的两个服务：:8100 解析 + :8101 VLM。
+
+    为什么要 VLM：`standard` 档（竖排/古籍扫描件）全靠它；`basic` 档不用，
+    但一起起省得来回判断 —— 起完跑完就停，显存不长期占着 ✓
+    """
+    root = _mineru4_dir()
+    api_port = _port_of(_mineru4_api(), 8100)
+    vlm_port = _port_of(_mineru4_vlm(), 8101)
+    api_exe = root / "runtime" / "python" / "Scripts" / "mineru-api.exe"
+    vlm_cmd = root / "run-vlm-server.cmd"
+    if not api_exe.is_file():
+        return False, f"找不到 v4 的解析服务：{api_exe}"
+    log_dir = root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    started = []
+    if not mineru4_api_alive():
+        # ★ 必须带 portable 环境（HOME/USERPROFILE/MINERU_HOME 指向 v4 目录），
+        #   否则它会去写 C:\Users\<你>\.mineru 并报 WinError 5 ✗
+        logf = open(log_dir / f"api{api_port}.log", "ab")        # noqa: SIM115
+        try:
+            subprocess.Popen([str(api_exe), "--host", "127.0.0.1",
+                              "--port", str(api_port)],
+                             cwd=str(root), stdout=logf,
+                             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                             env=_portable_env(root, "portable-home"))
+        except Exception as exc:                                 # noqa: BLE001
+            return False, f"启动 v4 解析服务失败：{type(exc).__name__}: {exc}"
+        finally:
+            try:
+                logf.close()
+            except Exception:                                    # noqa: BLE001
+                pass
+        started.append("api")
+    if not mineru4_vlm_alive() and vlm_cmd.is_file():
+        try:
+            subprocess.Popen(["cmd", "/c", str(vlm_cmd)], cwd=str(root),
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                             creationflags=getattr(subprocess,
+                                                   "CREATE_NEW_PROCESS_GROUP", 0))
+            started.append("vlm")
+        except Exception as exc:                                 # noqa: BLE001
+            log.warning("v4 的 VLM 服务没起来（basic 档仍可用）：%s", exc)
+    t0 = time.time()
+    while time.time() - t0 < wait_seconds:
+        time.sleep(3)
+        if mineru4_api_alive():
+            ok_vlm = mineru4_vlm_alive()
+            return True, (f"已就绪（{time.time() - t0:.0f} 秒；"
+                          f"VLM {'在' if ok_vlm else '没起，standard 档不可用'}）")
+    return False, f"等了 {wait_seconds} 秒 v4 还没起来（看 {log_dir}\\api{api_port}.log）"
+
+
+def stop_mineru4(wait_seconds: int = 40) -> tuple[bool, str]:
+    """**停掉 v4 的两个服务，把显存还回来**（项目主：用完即停）✓
+
+    安全铁律同 v3：只按 PID 杀，先核对命令行确实是 mineru 的进程，
+    绝不按名字杀 python（这台机器上还跑着灵犀自己和别的桥）✓
+    """
+    killed: list[int] = []
+    for port, hints in ((_port_of(_mineru4_api(), 8100), ("mineru", "api_server", "mineru-api")),
+                        (_port_of(_mineru4_vlm(), 8101), ("llama", "mineru"))):
+        pid = mineru_api_pid(port)
+        if not pid:
+            continue
+        cmd = (_proc_cmdline(pid) or "").lower()
+        if cmd and not any(h in cmd for h in hints):
+            log.warning("拒绝停止 PID %s：命令行不像 MinerU（%s）", pid, cmd[:120])
+            continue
+        try:
+            subprocess.run(["taskkill", "/PID", str(pid), "/F", "/T"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=60)
+            killed.append(pid)
+        except Exception as exc:                                 # noqa: BLE001
+            log.warning("停止 PID %s 失败：%s", pid, exc)
+    t0 = time.time()
+    while time.time() - t0 < wait_seconds:
+        time.sleep(2)
+        if not mineru4_api_alive(1.0) and not mineru4_vlm_alive(1.0):
+            return True, (f"已停止（PID {killed or '无'}），显存已释放；"
+                          f"{free_gpu_hint()}")
+    return False, f"已经 kill 了 {killed}，但端口还没释放（可能残留子进程）"
+
+
+def ensure_engine_ready(engine: str) -> tuple[bool, str]:
+    """跑 OCR 前把引擎需要的服务拉起来（只有 MinerU 系列需要）✓"""
+    if engine == "mineru4":
+        return start_mineru4()
+    return True, ""
+
+
+def shutdown_engine(engine: str) -> tuple[bool, str]:
+    """跑完收尾：v4 默认**用完即停**，清显存 ✓"""
+    if engine == "mineru4" and _mineru4_autostop():
+        return stop_mineru4()
+    return True, ""
 
 
 def _clean_env() -> dict:
@@ -320,7 +586,12 @@ def run_engine(engine: str, images: list[Path],
                 "pages": []}
     if engine == "mineru" and not mineru_api_alive():
         return {"ok": False, "engine": engine,
-                "error": "MinerU 的 API 没在跑（先运行 D:\\GJ\\MinerU\\run-api.cmd）",
+                "error": "MinerU v3 的 API 没在跑（界面上点「启动 MinerU」或跑 "
+                         "D:\\GJ\\MinerU\\_api8100.cmd）",
+                "pages": []}
+    if engine == "mineru4" and not mineru4_api_alive():
+        return {"ok": False, "engine": engine,
+                "error": "MinerU v4 的解析服务没在跑（调 start_mineru4() 起 :8100/:8101）",
                 "pages": []}
     if engine == "oxr" and not oxr_api_alive():
         return {"ok": False, "engine": engine,
@@ -328,7 +599,14 @@ def run_engine(engine: str, images: list[Path],
                 "pages": []}
 
     files = [str(p) for p in images]
-    cmd = [str(exe), str(bridge)] + files + list(spec.get("args") or [])
+    extra = list(spec.get("args") or [])
+    fn = spec.get("args_fn")
+    if callable(fn):                       # mineru4：tier / ocr_mode 每次现算 ✓
+        try:
+            extra = list(fn())
+        except Exception as exc:                                 # noqa: BLE001
+            log.warning("引擎 %s 的参数生成失败，用默认：%s", engine, exc)
+    cmd = [str(exe), str(bridge)] + files + extra
     t0 = time.time()
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
@@ -398,8 +676,14 @@ def _proc_cmdline(pid: int) -> str:
         return ""
 
 
-def mineru_api_pid(port: int = 8000) -> int | None:
-    """找监听 8000 端口的进程 PID（= MinerU 的 API）✓"""
+def mineru_api_pid(port: int | None = None) -> int | None:
+    """找监听某个端口的进程 PID（默认按**配置里 v3 的地址**取端口 ✓）。
+
+    ★ 2026-11-05 修：原来默认值写死 8000，而实际跑在 8100 →
+      `stop_mineru_api()` 永远找不到进程、显存收不回来 ✗
+    """
+    if port is None:
+        port = _port_of(_mineru_api(), 8000)
     try:
         out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True,
                              encoding="utf-8", errors="replace", timeout=60).stdout
@@ -431,7 +715,7 @@ def stop_mineru_api(wait_seconds: int = 40) -> tuple[bool, str]:
     global _mineru_started_pid
     pid = _mineru_started_pid or mineru_api_pid()
     if not pid:
-        return True, "MinerU API 没在跑（显存本来就没被它占）"
+        return True, "MinerU v3 的 API 没在跑（显存本来就没被它占）"
     cmd = _proc_cmdline(pid)
     # 核对：命令行里必须有 mineru / fast_api 之类的特征，否则拒绝动手 ✓
     low = cmd.lower()
@@ -571,6 +855,15 @@ def ocr_pdf(pdf: Path, engine: str = "", max_pages: int = 0,
     tmp = work_dir or Path(tempfile.mkdtemp(prefix="eg2ocr_"))
     parts: list[str] = []
     done = 0
+    # ★ 2026-11-05：MinerU v4 按需启动 —— 整份 PDF 只起一次，
+    #   跑完（finally）立刻停掉、把显存还回来 ✓
+    #   v3 保持原样：用户自己起 run-api / _api8100，灵犀只做"没起就给提示"。
+    ready, why = ensure_engine_ready(engine)
+    if not ready:
+        result["notice"] = (result["notice"] + " " + f"引擎 {engine} 启动失败：{why}").strip()
+        return result
+    if why:
+        log.info("OCR 引擎 %s：%s", engine, why)
     # ★ 用显存的活要串行（项目主：OCR 与打标同时跑会撞显存）✓
     #   注意：engine 可能是 CPU 的（rapid / ppocr_cpu）→ 那种不必占锁 ✓
     use_gpu = bool((ENGINES.get(engine) or {}).get("gpu"))
@@ -610,6 +903,15 @@ def ocr_pdf(pdf: Path, engine: str = "", max_pages: int = 0,
     finally:
         if slot is not None:
             slot.__exit__(None, None, None)
+        # ★ 用完即停：v4 默认跑完就把 :8100/:8101 停掉，显存还回来 ✓
+        try:
+            ok_stop, msg_stop = shutdown_engine(engine)
+            if msg_stop:
+                log.info("OCR 收尾（%s）：%s", engine, msg_stop)
+            if not ok_stop:
+                log.warning("OCR 收尾没成功（%s）：%s", engine, msg_stop)
+        except Exception as exc:                                 # noqa: BLE001
+            log.warning("OCR 收尾异常（%s）：%s", engine, exc)
         if cleanup:
             _sh.rmtree(tmp, ignore_errors=True)
 
@@ -684,12 +986,16 @@ def pick_engine(prefer: str = "", *, has_text: bool = True) -> str:
     """按配置和实际情况挑一个引擎。
 
     · 有文字层 → 优先 fitz（不花钱不出错）；要插图/表格则 mineru
-    · 没文字层（扫描版）→ 优先 ppocr（快），mineru 次之，rapid 兜底
+    · 没文字层（扫描版）→ 优先 ppocr（快），**mineru v4 次之**，v3 再兜底
+
+    ★ 2026-11-05：v4 虽然竖排/表格强，但它要起两个服务（约 13 秒 + 4 GB 显存），
+      所以**不抢 ppocr 的默认位置** —— 普通扫描件 ppocr 又快又够用；
+      竖排古籍、表格、ppocr 认不准的，在设置里把引擎选成 mineru4 即可 ✓
     """
     prefer = (prefer or "").strip().lower()
     if prefer in ENGINES and _usable(prefer):
         return prefer
-    order = (["mineru", "ppocr", "rapid"] if not has_text
+    order = (["ppocr", "mineru4", "mineru", "rapid"] if not has_text
              else ["ppocr", "rapid"])
     for name in order:
         if _usable(name):
@@ -704,7 +1010,7 @@ def _usable(name: str) -> bool:
         return False
     if name == "mineru" and not mineru_api_alive():
         return False
-    return True
+    return True            # mineru4 不查"服务在不在"：它自己会按需起来 ✓
 
 
 def free_gpu_hint() -> str:
@@ -722,4 +1028,6 @@ def free_gpu_hint() -> str:
 __all__ = ["ENGINES", "list_engines", "run_engine", "ocr_images", "ocr_pdf",
            "render_pdf_pages", "pick_engine", "mineru_api_alive",
            "mineru_api_pid", "start_mineru_api", "stop_mineru_api",
+           "mineru4_api_alive", "mineru4_vlm_alive", "start_mineru4",
+           "stop_mineru4", "ensure_engine_ready", "shutdown_engine",
            "free_gpu_hint", "gpu_slot", "gpu_status"]
