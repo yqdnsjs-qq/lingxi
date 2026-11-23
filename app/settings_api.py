@@ -70,7 +70,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine,
         return snapshot()
 
     @router.post("/api/settings")
-    async def put_settings(request: Request, payload: dict = Body(...)):
+    def put_settings(request: Request, payload: dict = Body(...)):
         """改全局设置（设备/模态/端口/模型…）—— 影响所有人 → 只有管理员 ✓。"""
         _need_admin(request)
         preset_id = payload.get("preset")

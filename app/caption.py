@@ -107,6 +107,18 @@ def _run(cfg, store, engine, chat_engine, limit, folder_ids, max_side,
     import numpy as np
 
     moved_to_cpu = False
+    # 4.0：分库若标了「不联网」，外部打标一律不用（只用本机视觉），并写审计 ✓
+    if remote:
+        try:
+            from . import kbpolicy as _kbpol
+
+            _slug = _kbpol.offline_store(cfg, store)
+            if _slug:
+                _kbpol.audit(_slug, "caption", "跳过外部打标模型，改用本机视觉")
+                log.info("「不联网」库 %s：打标不走外部模型", _slug)
+                remote = None
+        except Exception as exc:                              # noqa: BLE001
+            log.warning("检查不联网策略失败：%s", exc)
     try:
         # ---- 收集要打标的图片：kind=image，且还没有 caption 片段 ----
         where = ["f.kind = 'image'"]
@@ -214,6 +226,12 @@ def _run(cfg, store, engine, chat_engine, limit, folder_ids, max_side,
                     im = im.convert("RGB")
                 if remote_fn is not None:
                     cap = str(remote_fn(im) or "").strip()
+                    # ★ 2026-11-20：推理型模型（minimax-m3、hy3 之类）会把 <think> 草稿
+                    #   一起返回，不剥掉的话描述里全是"我们应该…"的自言自语 ✗
+                    import re as _re
+                    cap = _re.sub(r"(?is)<｜begin▁of▁thinking｜>.*?(?:<｜end▁of▁thinking｜>|$)",
+                                  "", cap).strip()
+                    cap = _re.sub(r"(?is)</?think[^>]*>", "", cap).strip()
                 else:
                     out = chat_engine.chat(
                         [{"role": "user", "content": PROMPT}],
@@ -232,6 +250,9 @@ def _run(cfg, store, engine, chat_engine, limit, folder_ids, max_side,
                 # 严格区分两类失败：
                 #   解码失败（没走到网络）→ 永久跳过，换模型也读不了
                 #   网络/模型/额度错误    → 不记，下次照样重试
+                # 网关说 400/invalid request：多半是这个模型不支持图片输入（不是坏图）
+                if "HTTP 400" in msg and ("invalid" in msg.lower() or "image" in msg.lower()):
+                    msg = msg + "（这个模型可能不支持看图，换一个多模态模型试试）"
                 _bad = any(k in msg for k in (
                     "无法识别的图片格式", "无法解码", "解码失败",
                     "cannot identify image", "unidentified image"))
@@ -270,6 +291,15 @@ def _save(store, engine, file_id: int, caption: str) -> None:
     import numpy as np
 
     vec = None
+    # ★ 2026-11-20：启动了「懒加载」以后，打标开始时嵌入模型可能还没加载完 →
+    #   vec 算不出来，INSERT 撞 chunks.vec NOT NULL（实测报
+    #   "NOT NULL constraint failed: chunks.vec"）✗ 先等它就绪（最多 60 秒）✓
+    try:
+        if engine is not None and getattr(engine, "model", None) is None \
+                and hasattr(engine, "wait_ready"):
+            engine.wait_ready(60.0)
+    except Exception:                                         # noqa: BLE001
+        pass
     if engine is not None and getattr(engine, "model", None) is not None:
         try:
             # 必须和文字片段用同一个 prompt（indexer 里是 "Document"），
@@ -283,6 +313,11 @@ def _save(store, engine, file_id: int, caption: str) -> None:
                 vec = (v / n).astype(np.float32).tobytes()
         except Exception:                                     # noqa: BLE001
             vec = None
+    if vec is None:
+        # 兜底：还是算不出向量也要把描述存下来（靠 FTS 照样能被文字搜到）✓
+        _dim0 = int(getattr(getattr(store, "cfg", None), "index_dim", 0) or 0)
+        vec = np.zeros(max(_dim0, 1), dtype=np.float32).tobytes()
+        log.warning("打标描述没算成向量（嵌入模型没就绪），已用零向量占位：%s", file_id)
     seq = store._query(
         "SELECT COALESCE(MAX(seq), -1) + 1 s FROM chunks WHERE file_id=?",
         (file_id,))[0]["s"]

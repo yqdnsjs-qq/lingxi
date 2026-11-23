@@ -250,6 +250,21 @@ class EmbeddingEngine:
                 self.modality_override = None
         return self.modality
 
+    def wait_ready(self, timeout: float = 0.0) -> bool:
+        """等模型加载完（4.0 起改成「启动不加载」，第一次要用时在这里等）✓
+
+        timeout<=0：只查一次、不等。
+        返回 True = 可以编码了。
+        """
+        if timeout <= 0:
+            return self.model is not None and not self._reloading
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.model is not None and not self._reloading:
+                return True
+            time.sleep(0.5)
+        return self.model is not None and not self._reloading
+
     # ------------------------------------------------------------ 热重载
     @property
     def reloading(self) -> bool:

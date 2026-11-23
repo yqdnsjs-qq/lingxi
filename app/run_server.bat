@@ -22,7 +22,13 @@ set "TRANSFORMERS_OFFLINE=1"
 set "HF_HUB_DISABLE_TELEMETRY=1"
 set "HF_HUB_DISABLE_SYMLINKS_WARNING=1"
 rem ---- enforce login (multi-user): no login = only the login page ----
-set "EG2_ENFORCE_LOGIN=1"
+set "EG2_ENFORCE_LOGIN=0"
+rem 开发副本：界面心跳不自动停服（30 天）
+set "EG2_UI_IDLE=1800"
+rem 关窗后等多久才停服务（秒）：刷新会在期间收到心跳 → 不停；真关了 → 停并放显存
+set "EG2_UI_GRACE=30"
+rem 关窗口后 5 分钟内没有心跳 + 没有请求就自动停服务、放显存（原 2592000 是开发期免停，已改回）
+set "EG2_UI_BUSY=600"
 
 rem ---- 选一个可写的日志文件 ----
 rem 上一个没关干净的窗口会占住 server.log，那样 ">>" 直接失败，

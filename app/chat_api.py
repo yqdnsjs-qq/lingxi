@@ -132,6 +132,23 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
         except Exception:                                        # noqa: BLE001
             return "#%d" % int(uid)
 
+    def _local_model_answer(messages, max_new_tokens: int = 1200) -> str:
+        """用**本机**对话模型作答（上锁库强制走这里，不出网）✓"""
+        from pathlib import Path as _P                            # noqa: PLC0415
+
+        from .chat import ChatEngine                              # noqa: PLC0415
+
+        root = _P(__file__).resolve().parent.parent
+        saved = str(store.get_meta("chat_model") or "")
+        p = _P(saved) if saved else None
+        if p is not None and not p.is_absolute():
+            p = root / p
+        if p is not None and not (p / "config.json").exists():
+            p = None
+        eng = ChatEngine(cfg, model_dir=p)
+        got = eng.chat(messages, max_new_tokens=max_new_tokens)
+        return str((got or {}).get("answer") or "")
+
     def _api_items_for(request) -> list[dict]:                    # noqa: ANN001
         """当前用户"能用"的外部 API 配置（规则见 app/apimodels.py）。
 
@@ -244,7 +261,7 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
         return dict(row[0])
 
     @router.get("/api/chat2/conversations")
-    async def list_convs(request: Request):
+    def list_convs(request: Request):
         uid = _uid(request)
         rows = store._query(                                     # noqa: SLF001
             "SELECT c.*, (SELECT COUNT(*) FROM chat_message m WHERE m.conv_id=c.id) AS n "
@@ -253,7 +270,7 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
         return {"conversations": [dict(r) for r in rows]}
 
     @router.post("/api/chat2/conversations")
-    async def new_conv(request: Request, payload: dict = Body(default={})):
+    def new_conv(request: Request, payload: dict = Body(default={})):
         uid = _uid(request)
         now = time.time()
         title = str(payload.get("title") or "新对话").strip()[:MAX_TITLE]
@@ -264,7 +281,7 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
         return {"ok": True, "id": int(cur.lastrowid), "title": title}
 
     @router.put("/api/chat2/conversations/{conv_id}")
-    async def rename_conv(request: Request, conv_id: int, payload: dict = Body(...)):
+    def rename_conv(request: Request, conv_id: int, payload: dict = Body(...)):
         _own(conv_id, request)
         title = str(payload.get("title") or "").strip()[:MAX_TITLE]
         if not title:
@@ -276,7 +293,7 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
         return {"ok": True, "title": title}
 
     @router.delete("/api/chat2/conversations/{conv_id}")
-    async def del_conv(request: Request, conv_id: int):
+    def del_conv(request: Request, conv_id: int):
         _own(conv_id, request)
         store._conn.execute("DELETE FROM chat_message WHERE conv_id=?", (int(conv_id),))
         store._conn.execute("DELETE FROM chat_conversation WHERE id=?", (int(conv_id),))
@@ -284,7 +301,7 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
         return {"ok": True}
 
     @router.get("/api/chat2/conversations/{conv_id}")
-    async def get_conv(request: Request, conv_id: int):
+    def get_conv(request: Request, conv_id: int):
         conv = _own(conv_id, request)
         rows = store._query(                                     # noqa: SLF001
             "SELECT id, role, content, sources, created_at FROM chat_message "
@@ -303,7 +320,7 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
 
     # ---------- 流式发送 ----------
     @router.post("/api/chat2/conversations/{conv_id}/stream")
-    async def stream_send(request: Request, conv_id: int, payload: dict = Body(...)):
+    def stream_send(request: Request, conv_id: int, payload: dict = Body(...)):
         """和 /send 一样，但边生成边返回（SSE）。
 
         事件格式：
@@ -329,6 +346,14 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
         use_kb = bool(payload.get("kb"))
         use_dify = bool(payload.get("dify"))
         pick = str(payload.get("pick") or "").strip()
+        # 4.0：选中的库里有「不联网」的 → 拒绝云端作答（本地检索/查看不受影响）✓
+        _kbs = [str(x).strip() for x in (payload.get("kbs") or []) if str(x).strip()]
+        if _kbs:
+            from . import kbpolicy as _kbpol              # noqa: PLC0415
+
+            # 出口逐个掐：先关联网搜索与 Dify；外部模型等 pick 解析出地址后再判 ✓
+            use_web = False
+            use_dify = False
 
         # 先算好要注入的上下文（这部分是同步的，放在流之前）
         web = None
@@ -354,7 +379,9 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
             try:
                 idx = int(pick.split(":", 1)[1])
                 # 和 /api/chat2/models 同一个列表算下标（含公共/共享的那些）✓
-                _items = _api_items_for(request)
+                from . import apimodels as _am4
+
+                _items = _am4.expand(_api_items_for(request))
                 if idx < 0 or idx >= len(_items):
                     raise HTTPException(status_code=400,
                                         detail="这个模型已经不属于你了，刷新页面重选")
@@ -381,6 +408,14 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
         if not remote:
             raise HTTPException(status_code=400,
                                 detail="还没配外部模型：去「设置 → 外部模型」填好 ✓")
+        _forced_note = ""
+        if _kbs:                                      # 4.0 隐私：上锁库 → 强制本机/局域网模型
+            from . import kbpolicy as _kbpol3             # noqa: PLC0415
+
+            _forced_note = _kbpol3.force_local(
+                cfg, store, _kbs, str(remote.get("base_url") or ""))
+            if _forced_note:
+                log.info("上锁库改本机模型：%s", _forced_note)
 
         # 存用户消息 + 起标题
         now = time.time()
@@ -427,6 +462,26 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
                     from .multiuser import visible_folder_ids as _vis
 
                     vis_ids = _vis(cfg.db_path, _me_user(request))
+                    # 4.0：选了具体知识库 → 只在这些库挂的文件夹里检索；「不联网」库一律剔除 ✓
+                    try:
+                        from . import kbpolicy as _kbpol2
+                        if _kbs:
+                            _kf = _kbpol2.kb_folder_ids(cfg, store, _kbs)
+                            vis_ids = [i for i in vis_ids if int(i) in _kf]
+                        _off = _kbpol2.offline_folder_ids(cfg, store)
+                        # ★ 2026-11-20：用户**显式**勾了「不看联网」库 → 放行它的文件夹；
+                        #   会不会真出网由后面的 guard_llm 判（公网模型直接 400）✓
+                        if _kbs:
+                            _off = _off - _kbpol2.kb_folder_ids(cfg, store, _kbs)
+                        if _off:
+                            _n0 = len(vis_ids)
+                            vis_ids = [i for i in vis_ids if int(i) not in _off]
+                            if len(vis_ids) != _n0:
+                                _kbpol2.audit("(全部)", "search",
+                                              "已从检索范围剔除 %d 个「不联网」库的文件夹"
+                                              % (_n0 - len(vis_ids)))
+                    except Exception as _exc:                 # noqa: BLE001
+                        log.warning("处理知识库范围失败：%s", _exc)
                     res = _sc.search(text, top_k=8, folder_ids=vis_ids)
                     # ⚠ 2026-10-23：Searcher.search 返回的键是 **results**（不是 hits）——
                     #   以前这里读 hits 永远拿到 None，于是聊天里勾了知识库
@@ -471,13 +526,21 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
         def gen():
             parts: list[str] = []
             try:
-                for piece in chat_stream(remote.get("base_url"), remote.get("model"),
-                                         messages, timeout=180,
-                                         max_tokens=int(remote.get("max_tokens") or 1200),
-                                         api_key=remote.get("api_key") or None,
-                                         extra_headers=remote.get("headers") or None):
-                    parts.append(piece)
-                    yield "data: " + json.dumps({"delta": piece}, ensure_ascii=False) + "\n\n"
+                if _forced_note:
+                    # 上锁库：片段不能交给公网模型 → 本机算完再按块吐（界面一样是流式）✓
+                    _a0 = _local_model_answer(messages)
+                    parts.append(_a0)
+                    yield ("data: " + json.dumps({"delta": _a0, "note": _forced_note},
+                                                 ensure_ascii=False) + "\n\n")
+                else:
+                    for piece in chat_stream(remote.get("base_url"), remote.get("model"),
+                                             messages, timeout=180,
+                                             max_tokens=int(remote.get("max_tokens") or 1200),
+                                             api_key=remote.get("api_key") or None,
+                                             extra_headers=remote.get("headers") or None):
+                        parts.append(piece)
+                        yield ("data: " + json.dumps({"delta": piece},
+                                                    ensure_ascii=False) + "\n\n")
             except Exception as exc:                             # noqa: BLE001
                 log.warning("流式生成失败：%s", exc)
                 yield "data: " + json.dumps({"error": str(exc)}, ensure_ascii=False) + "\n\n"
@@ -498,7 +561,9 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
             yield "data: " + json.dumps({"done": True, "web": web,
                                          "kb": kb_hits, "kb_note": kb_note,
                                          "dify": (dfy or {}).get("results") or [],
-                                         "model": remote.get("model") or ""},
+                                         "model": ("本机（上锁库）" if _forced_note
+                                                   else (remote.get("model") or "")),
+                                         "model_note": _forced_note},
                                         ensure_ascii=False) + "\n\n"
 
         return StreamingResponse(gen(), media_type="text/event-stream",
@@ -507,7 +572,7 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
 
     # ---------- 导出 ----------
     @router.get("/api/chat2/conversations/{conv_id}/export")
-    async def export_conv(request: Request, conv_id: int,
+    def export_conv(request: Request, conv_id: int,
                           fmt: str = Query("md")):
         """导出成一个文件（Markdown 或 JSON）。前端直接下载。"""
         conv = _own(conv_id, request)
@@ -559,7 +624,7 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
 
     # ---------- 可选模型列表 ----------
     @router.get("/api/chat2/models")
-    async def list_models(request: Request):
+    def list_models(request: Request):
         """已部署的本机模型 + 用户配的多套 API。"""
         uid = _uid(request)
         out: list[dict] = []
@@ -567,7 +632,10 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
         #    依赖它自己的闭包，这里调不到）。这边只负责列 **API 那几套** ✓
         # ② 用户配的多套 API（自己 + 别人公共/共享给我的）
         try:
-            items = _api_items_for(request)
+            # ★ 2026-11-20：「一个网关多模型」摊平 —— api:N 的下标要跟真正发请求时一致 ✓
+            from . import apimodels as _amx
+
+            items = _amx.expand(_api_items_for(request))
             for i, x in enumerate(items):
                 nm = str(x.get("name") or f"API {i + 1}")
                 md = str(x.get("model") or "")
@@ -583,6 +651,8 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
                 out.append({"id": f"api:{i}",
                             "label": f"{nm} · {md}{_tag}",
                             "kind": "api",
+                            "provider": nm,
+                            "model": md,
                             "shared": (not x.get("_own")),
                             "public": bool(x.get("_public")),
                             "owner": str(x.get("_owner") or ""),
@@ -613,7 +683,7 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
 
     # ---------- 发消息 ----------
     @router.post("/api/chat2/conversations/{conv_id}/send")
-    async def send(request: Request, conv_id: int, payload: dict = Body(...)):
+    def send(request: Request, conv_id: int, payload: dict = Body(...)):
         # 外网防刷：同 IP 每分钟最多 30 条（项目主 2026-10-21 外网部署）
         from . import ratelimit as _rl
 
@@ -628,6 +698,14 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
         use_web = bool(payload.get("web"))
         use_kb = bool(payload.get("kb"))
         use_dify = bool(payload.get("dify"))
+        # 4.0：选了「不联网」的库 → 既不发外网搜索，也不发 Dify ✓
+        _kbs = [str(x).strip() for x in (payload.get("kbs") or []) if str(x).strip()]
+        if _kbs:
+            from . import kbpolicy as _kbpol              # noqa: PLC0415
+
+            # 出口逐个掐：先关联网搜索与 Dify；外部模型等 pick 解析出地址后再判 ✓
+            use_web = False
+            use_dify = False
 
         now = time.time()
         # ① 存用户消息
@@ -689,6 +767,26 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
 
                     _me = _prefs(request)                     # 触发一次连接（无副作用）
                     vis_ids = _vis(cfg.db_path, _me_user(request))
+                    # 4.0：选了具体知识库 → 只在这些库挂的文件夹里检索；「不联网」库一律剔除 ✓
+                    try:
+                        from . import kbpolicy as _kbpol2
+                        if _kbs:
+                            _kf = _kbpol2.kb_folder_ids(cfg, store, _kbs)
+                            vis_ids = [i for i in vis_ids if int(i) in _kf]
+                        _off = _kbpol2.offline_folder_ids(cfg, store)
+                        # ★ 2026-11-20：用户**显式**勾了「不看联网」库 → 放行它的文件夹；
+                        #   会不会真出网由后面的 guard_llm 判（公网模型直接 400）✓
+                        if _kbs:
+                            _off = _off - _kbpol2.kb_folder_ids(cfg, store, _kbs)
+                        if _off:
+                            _n0 = len(vis_ids)
+                            vis_ids = [i for i in vis_ids if int(i) not in _off]
+                            if len(vis_ids) != _n0:
+                                _kbpol2.audit("(全部)", "search",
+                                              "已从检索范围剔除 %d 个「不联网」库的文件夹"
+                                              % (_n0 - len(vis_ids)))
+                    except Exception as _exc:                 # noqa: BLE001
+                        log.warning("处理知识库范围失败：%s", _exc)
                     res = _sc.search(text, top_k=8, folder_ids=vis_ids)
                     # ⚠ 2026-10-23：Searcher.search 返回的键是 **results**（不是 hits）——
                     #   以前这里读 hits 永远拿到 None，于是聊天里勾了知识库
@@ -734,7 +832,9 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
                 idx = int(pick.split(":", 1)[1])
                 # ★ 2026-10-22：和 /api/chat2/models 用**同一个**列表算下标，
                 #   否则普通用户选「服务器 llama.cpp」会因为下标对不上而报"没共享给你" ✗
-                items = _api_items_for(request)
+                from . import apimodels as _am2
+
+                items = _am2.expand(_api_items_for(request))
                 if idx < 0 or idx >= len(items):
                     raise HTTPException(status_code=400, detail="这个模型已经不属于你了，刷新页面重选")
                 item = items[idx]
@@ -764,18 +864,29 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
             raise HTTPException(
                 status_code=400,
                 detail="还没配外部模型：去「设置 → 外部模型」填地址 + 模型名 + Key ✓")
+        _forced_note = ""
+        if _kbs:                                      # 4.0 隐私：上锁库 → 强制本机/局域网模型
+            from . import kbpolicy as _kbpol3             # noqa: PLC0415
+
+            _forced_note = _kbpol3.force_local(
+                cfg, store, _kbs, str(remote.get("base_url") or ""))
+            if _forced_note:
+                log.info("上锁库改本机模型：%s", _forced_note)
 
         from .vlm_client import chat_once
 
-        try:
-            answer = chat_once(remote.get("base_url"), remote.get("model"), messages,
-                               timeout=180,
-                               max_tokens=int(remote.get("max_tokens") or 1200),
-                               api_key=remote.get("api_key") or None,
-                               extra_headers=remote.get("headers") or None)
-        except Exception as exc:                                 # noqa: BLE001
-            log.warning("聊天调用模型失败：%s", exc)
-            raise HTTPException(status_code=502, detail=f"模型调用失败：{exc}") from exc
+        if _forced_note:
+            answer = _local_model_answer(messages)
+        else:
+            try:
+                answer = chat_once(remote.get("base_url"), remote.get("model"), messages,
+                                   timeout=180,
+                                   max_tokens=int(remote.get("max_tokens") or 1200),
+                                   api_key=remote.get("api_key") or None,
+                                   extra_headers=remote.get("headers") or None)
+            except Exception as exc:                             # noqa: BLE001
+                log.warning("聊天调用模型失败：%s", exc)
+                raise HTTPException(status_code=502, detail=f"模型调用失败：{exc}") from exc
 
         # ★ 存库前剥掉思考过程（否则界面上全是"让我想想…"）
         answer = strip_think(answer)
@@ -795,7 +906,9 @@ def create_router(cfg: Config, store: Store, engine=None) -> APIRouter:
         store._conn.commit()                                     # noqa: SLF001
 
         return {"ok": True, "answer": answer, "web": web,
-                "model": (remote or {}).get("model") or "",
+                "model": ("本机（上锁库）" if _forced_note
+                          else ((remote or {}).get("model") or "")),
+                "model_note": _forced_note,
                 "kb": kb_hits, "kb_note": kb_note,
                 "dify": dfy,
                 "title": (store._query(                          # noqa: SLF001

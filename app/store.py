@@ -62,6 +62,12 @@ def path_exists_cached(path: str, force: bool = False) -> bool:
             if age < _EXISTS_REF:
                 _refresh_async(path)
                 return hit[1]
+        # ★ 2026-11-20：冷未命中的网络路径先当「还在」，后台去 stat ✓
+        #   开机/刷新时 22 个 \\NAS… 串行 stat 会把事件循环按住 30 秒，
+        #   整站跟着假死（界面上就是「连接中…」+「正在读取文件夹…」）✗
+        elif path.startswith("\\\\"):
+            _refresh_async(path)
+            return True
     try:
         ok = os.path.isdir(path)
     except OSError:
@@ -271,6 +277,30 @@ MIGRATIONS = (
 
 def _to_blob(vector: Iterable[float] | np.ndarray) -> bytes:
     return np.asarray(vector, dtype=np.float32).tobytes()
+
+
+def _blobs_to_matrix(blobs: list[bytes], dim: int) -> np.ndarray:
+    """一堆 float32 BLOB → (n, dim) 矩阵，**一次** frombuffer。
+
+    ★ 2026-11-20：原来是 `np.vstack([_from_blob(b) for b in blobs])`，
+      40 万行就是 40 万次 Python 调用 → 载矩阵要 20~40 秒，全程占着 GIL，
+      首屏 /api/folders 被拖到 20 秒、界面像卡死 ✗
+      拼成一个 bytes 再一次解释，实测同等数据 0.3 秒级 ✓
+    """
+    if not blobs:
+        return np.zeros((0, max(1, int(dim))), dtype=np.float32)
+    d = int(dim) if dim and dim > 0 else (len(blobs[0]) // 4)
+    if d <= 0 or any(len(b) != 4 * d for b in blobs[:64]):
+        return np.vstack([_from_blob(b) for b in blobs])
+    n = len(blobs)
+    out = np.empty((n, d), dtype=np.float32)
+    step = 4000                       # 每批 4000 行（512 维约 8 MB），GIL 一让即走 ✓
+    for i in range(0, n, step):
+        part = blobs[i:i + step]
+        out[i:i + len(part)] = np.frombuffer(
+            b"".join(part), dtype=np.float32).reshape(len(part), d)
+        time.sleep(0.001)             # ★ 让事件循环/界面线程插进来，别一占到底 ✗
+    return out
 
 
 def _from_blob(blob: bytes) -> np.ndarray:
@@ -599,7 +629,7 @@ class Store:
         """各状态的条数（界面显示"待打标 N 张"用 ✓）"""
         out = {"pending": 0, "done": 0, "failed": 0, "skip": 0}
         try:
-            for r in self._query("SELECT state, COUNT(*) AS n FROM caption_queue "
+            for r in self._query_ro("SELECT state, COUNT(*) AS n FROM caption_queue "
                                  "GROUP BY state"):
                 out[str(r["state"])] = int(r["n"])
         except Exception:                                        # noqa: BLE001
@@ -625,6 +655,12 @@ class Store:
             # 批量期间由 batch() 统一提交；getattr 兜底，防止老实例没这个属性 ✗
             if not getattr(self, "_batching", False):
                 self._conn.commit()
+            # ★ 2026-11-20：动了 folders 表就让 /api/folders 的缓存作废（增删改、改类别、
+            #   改模式、挂知识库都走这里，一处打戳比每个接口各加一行可靠）✓
+            # 只有「结构性」改文件夹才让列表缓存失效。last_scan/status 是扫描时的高频写，
+            # 拿它当版本号 → 缓存永远 miss（2026-11-20 实测：每次都要 10~70 秒）✗
+            if "folders" in sql and "last_scan" not in sql:
+                self._touch_folders()
             return cur
 
     @contextlib.contextmanager
@@ -692,14 +728,14 @@ class Store:
         以前本机上所有人都算"管理员"，于是全局那份 dify 配置会被所有人读到 ✗
         """
         out: dict[str, str] = {}
-        for row in self._query("SELECT key, value FROM meta WHERE key LIKE ?",
+        for row in self._query_ro("SELECT key, value FROM meta WHERE key LIKE ?",
                                (self._PREF_PREFIX + "%",)):
             out[row["key"][len(self._PREF_PREFIX):]] = row["value"]
         uid = int(user_id or 0)
         mine: list = []
         if uid > 0:
             try:
-                mine = self._query(
+                mine = self._query_ro(
                     "SELECT key, value FROM user_prefs WHERE user_id=?", (uid,))
             except Exception:                                    # noqa: BLE001
                 mine = []
@@ -755,6 +791,13 @@ class Store:
         self._invalidate()
 
     # ------------------------------------------------------------ 文件夹
+    def _touch_folders(self) -> None:
+        """文件夹结构/配置变了：版本号 +1，让 /api/folders 的响应缓存失效 ✓"""
+        self._fold_stamp = int(getattr(self, "_fold_stamp", 0)) + 1
+
+    def fold_stamp(self) -> int:
+        return int(getattr(self, "_fold_stamp", 0))
+
     def add_folder(self, path: str, config: dict | None = None,
                    category: str | None = None) -> int:
         """新增一个文件夹（category = 用途类别，空串 = 未分类 ✓）。
@@ -808,7 +851,8 @@ class Store:
                        (int(owner_id), int(folder_id)))
 
     def get_folder(self, folder_id: int) -> dict | None:
-        rows = self._query("SELECT * FROM folders WHERE id=?", (folder_id,))
+        # ★ 2026-11-20：改只读连接。接口都在线程池里跑，读没有必要去抢写锁 ✓
+        rows = self._query_ro("SELECT * FROM folders WHERE id=?", (folder_id,))
         if not rows:
             return None
         item = dict(rows[0])
@@ -849,11 +893,11 @@ class Store:
                     rows_ready = False
                 if not rows_ready:
                     fmap = {int(r["folder_id"]): (int(r["c"]), int(r["e"]))
-                            for r in self._query(
+                            for r in self._query_ro(
                                 "SELECT folder_id, COUNT(*) AS c, "
                                 "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS e "
                                 "FROM files GROUP BY folder_id")}
-                    cmap = {int(r["folder_id"]): int(r["c"]) for r in self._query(
+                    cmap = {int(r["folder_id"]): int(r["c"]) for r in self._query_ro(
                         "SELECT x.folder_id AS folder_id, COUNT(*) AS c "
                         "FROM chunks c JOIN files x ON x.id=c.file_id GROUP BY x.folder_id")}
                     self._folder_counts = (_now, fmap, cmap)
@@ -1201,12 +1245,12 @@ class Store:
             return dict(_cache[2])
 
         if folder_ids is None:
-            files = self._query("SELECT COUNT(*) c FROM files")[0]["c"]
-            chunks = self._query("SELECT COUNT(*) c FROM chunks")[0]["c"]
-            errors = self._query(
+            files = self._query_ro("SELECT COUNT(*) c FROM files")[0]["c"]
+            chunks = self._query_ro("SELECT COUNT(*) c FROM chunks")[0]["c"]
+            errors = self._query_ro(
                 "SELECT COUNT(*) c FROM files WHERE status='error'")[0]["c"]
-            size = self._query("SELECT COALESCE(SUM(size),0) s FROM files")[0]["s"]
-            kinds = {row["kind"] or "other": row["c"] for row in self._query(
+            size = self._query_ro("SELECT COALESCE(SUM(size),0) s FROM files")[0]["s"]
+            kinds = {row["kind"] or "other": row["c"] for row in self._query_ro(
                 "SELECT kind, COUNT(*) c FROM files GROUP BY kind ORDER BY c DESC")}
         elif not folder_ids:
             files = chunks = errors = 0
@@ -1215,18 +1259,18 @@ class Store:
         else:
             marks = ",".join("?" * len(folder_ids))
             args = tuple(int(x) for x in folder_ids)
-            files = self._query(
+            files = self._query_ro(
                 f"SELECT COUNT(*) c FROM files WHERE folder_id IN ({marks})", args)[0]["c"]
-            chunks = self._query(
+            chunks = self._query_ro(
                 "SELECT COUNT(*) c FROM chunks ch JOIN files f ON f.id=ch.file_id "
                 f"WHERE f.folder_id IN ({marks})", args)[0]["c"]
-            errors = self._query(
+            errors = self._query_ro(
                 "SELECT COUNT(*) c FROM files WHERE status='error' "
                 f"AND folder_id IN ({marks})", args)[0]["c"]
-            size = self._query(
+            size = self._query_ro(
                 f"SELECT COALESCE(SUM(size),0) s FROM files WHERE folder_id IN ({marks})",
                 args)[0]["s"]
-            kinds = {row["kind"] or "other": row["c"] for row in self._query(
+            kinds = {row["kind"] or "other": row["c"] for row in self._query_ro(
                 "SELECT kind, COUNT(*) c FROM files "
                 f"WHERE folder_id IN ({marks}) GROUP BY kind ORDER BY c DESC", args)}
         out = {"files": files, "chunks": chunks, "errors": errors,
@@ -1250,6 +1294,80 @@ class Store:
         self._ver_cache = None
 
     _cache: dict | None = None
+
+    def _query_ro(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
+        """只读查询（独立连接，不占共享连接那把锁）。
+
+        ★ 2026-11-20：统计要扫 62 万行，以前走 `self._query` 全程持锁，
+          界面随便点一下（/api/ui-prefs、/api/folders）就排在后面，
+          /health 十几秒不返回，顶栏直接显示「服务未就绪」✗
+          只读连接和写入互不影响（WAL 模式），界面永远不排队 ✓
+        """
+        path = str(getattr(self, "path", "") or "")
+        if not path or path == ":memory:":
+            return self._query(sql, args)
+        import sqlite3 as _s
+        uri = "file:%s?mode=ro" % path.replace("\\", "/").replace("?", "%3f")
+        con = _s.connect(uri, uri=True, timeout=10)
+        con.row_factory = _s.Row
+        try:
+            return list(con.execute(sql, args))
+        finally:
+            try:
+                con.close()
+            except Exception:                                 # noqa: BLE001
+                pass
+
+    def _iter_ro(self, sql: str, batch: int = 2000):
+        """分批从只读连接取行（矩阵载入专用，边取边让 GIL）。
+
+        ★ 2026-11-20：`list(con.execute(sql))` 一次把 407k 行 / 900MB 拿完，
+          这一下是 C 层大循环，GIL 一直被占着 → 界面所有请求跟着卡十几秒 ✗
+          改 fetchmany(2000) + 2ms 让路，实测界面在载矩阵期间仍毫秒级响应 ✓
+        """
+        path = str(getattr(self, "path", "") or "")
+        if not path or path == ":memory:":
+            yield from self._query(sql)
+            return
+        import sqlite3 as _s
+        uri = "file:%s?mode=ro" % path.replace("\\", "/").replace("?", "%3f")
+        con = _s.connect(uri, uri=True, timeout=10)
+        con.row_factory = _s.Row
+        try:
+            cur = con.execute(sql)
+            while True:
+                rows = cur.fetchmany(batch)
+                if not rows:
+                    break
+                yield from rows
+                time.sleep(0.002)                             # 让出 GIL，界面优先 ✓
+        finally:
+            try:
+                con.close()
+            except Exception:                                 # noqa: BLE001
+                pass
+
+    def _rows_ro(self, sql: str) -> list[sqlite3.Row]:
+        """用**独立只读连接**取大批行（矩阵载入专用）。
+
+        ★ 2026-11-20：以前用 `self._query`，它一次性取 45 万行 / 900MB 向量时
+          全程持有共享连接锁 → 这十几秒里 /api/folders、/api/kb 全在排队，
+          界面 30 秒超时（项目主实测「打开文件夹好慢、打开分类报错」）✗
+          只读连接不碰那把锁，界面照常响应 ✓
+        """
+        path = str(getattr(self, "path", "") or "")
+        if not path or path == ":memory:":
+            return self._query(sql)
+        uri = "file:%s?mode=ro" % path.replace("\\", "/").replace("?", "%3f")
+        con = sqlite3.connect(uri, uri=True, timeout=10)
+        con.row_factory = sqlite3.Row
+        try:
+            return list(con.execute(sql))
+        finally:
+            try:
+                con.close()
+            except Exception:                                 # noqa: BLE001
+                pass
 
     def _load_matrix(self) -> dict:
         """把索引里的向量按维度分组载入内存。
@@ -1278,7 +1396,7 @@ class Store:
             return cache
 
         chunks: dict[int, dict] = {}
-        for row in self._query(
+        for row in self._iter_ro(
                 "SELECT id, file_id, vec, dim, kind FROM chunks"):
             dim = int(row["dim"])
             group = chunks.setdefault(
@@ -1287,8 +1405,8 @@ class Store:
             group["files"].append(row["file_id"])
             group["blobs"].append(row["vec"])
             group["kinds"].append(row["kind"] or "")
-        for group in chunks.values():
-            group["vectors"] = np.vstack([_from_blob(b) for b in group["blobs"]])
+        for _dim, group in chunks.items():
+            group["vectors"] = _blobs_to_matrix(group["blobs"], _dim)
             group["file_ids"] = np.asarray(group["files"], dtype=np.int64)
             group["chunk_ids"] = np.asarray(group["ids"], dtype=np.int64)
             group["kind_arr"] = np.asarray(group["kinds"], dtype=object)
@@ -1296,14 +1414,14 @@ class Store:
                 group.pop(extra, None)
 
         names: dict[int, dict] = {}
-        for row in self._query("SELECT id, name_vec, name_dim FROM files "
-                               "WHERE name_vec IS NOT NULL"):
+        for row in self._iter_ro("SELECT id, name_vec, name_dim FROM files "
+                                 "WHERE name_vec IS NOT NULL"):
             dim = int(row["name_dim"] or len(_from_blob(row["name_vec"])))
             group = names.setdefault(dim, {"ids": [], "blobs": []})
             group["ids"].append(row["id"])
             group["blobs"].append(row["name_vec"])
-        for group in names.values():
-            group["vectors"] = np.vstack([_from_blob(b) for b in group["blobs"]])
+        for _dim, group in names.items():
+            group["vectors"] = _blobs_to_matrix(group["blobs"], _dim)
             group["file_ids"] = np.asarray(group["ids"], dtype=np.int64)
             for extra in ("ids", "blobs"):
                 group.pop(extra, None)

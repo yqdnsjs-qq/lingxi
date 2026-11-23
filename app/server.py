@@ -74,6 +74,16 @@ APP_VERSION = "2.0.0"
 
 log = logging.getLogger("eg2.server")
 
+# ★ 2026-11-20：界面接口都改同步了（跑在线程池里），默认只有 40 个线程；
+#   遇上网络盘 stat / 载矩阵这类慢活，后面的请求会排成长串，界面一直「连接中…」✗
+#   把上限提到 160：慢的慢慢跑，界面该秒回还是秒回 ✓
+try:
+    import anyio as _anyio
+
+    _anyio.to_thread.current_default_thread_limiter().total_tokens = 160
+except Exception:                                     # noqa: BLE001
+    pass
+
 
 # ------------------------------------------------------------------ 请求模型
 class EmbeddingRequest(BaseModel):
@@ -131,6 +141,7 @@ def _close_ui_now() -> None:
 
 def create_app(cfg: Config, engine: EmbeddingEngine, store: Store | None = None) -> FastAPI:
     app = FastAPI(
+
         title="EmbeddingGemma 2 本地服务",
         version=APP_VERSION,
         description="Google EmbeddingGemma 2 的多模态嵌入服务（文本 / 图片 / 音频 / 视频）"
@@ -154,6 +165,15 @@ def create_app(cfg: Config, engine: EmbeddingEngine, store: Store | None = None)
         log.warning("加载文件夹类别表失败（用出厂默认）：%s", _exc)
     engine.modality_provider = lambda: effective_modality(cfg, store)
     indexer = Indexer(cfg, store, engine)
+    # 4.0：主库扫完一个文件夹 → 它若归某个知识库，自动同步进那个分库 ✓
+    try:
+        from types import SimpleNamespace as _NS
+
+        from app.kbauto import make_hook as _kb_make_hook
+
+        indexer.on_folder_done = _kb_make_hook(_NS(cfg=cfg, store=store, engine=engine))
+    except Exception as _kb_exc:                               # noqa: BLE001
+        log.warning("知识库自动同步钩子没挂上：%s", _kb_exc)
     app.state.store = store
     app.state.indexer = indexer
     app.include_router(create_search_router(cfg, store, engine, indexer))
@@ -516,8 +536,44 @@ def create_app(cfg: Config, engine: EmbeddingEngine, store: Store | None = None)
     except Exception as exc:                                     # noqa: BLE001
         print(f"  [外网] 关闭接口文档失败（不影响主服务）：{exc}")
 
+    # ---- 临时诊断：事件循环卡住时打印主线程栈（查完就删）----
+    try:
+        _lag_state = {"last": time.time()}
+
+        import asyncio as _aio
+
+        async def _lag_tick() -> None:
+            while True:
+                await _aio.sleep(0.5)
+                _lag_state["last"] = time.time()
+
+        @app.on_event("startup")
+        async def _lag_start() -> None:                          # noqa: D401
+            _aio.create_task(_lag_tick())
+
+            def _watch() -> None:
+                while True:
+                    time.sleep(1.0)
+                    _lag = time.time() - _lag_state["last"] - 0.5
+                    if _lag > 1.5:
+                        import sys as _sys
+                        import traceback as _tb
+                        _fr = _sys._current_frames().get(threading.main_thread().ident)
+                        _st = _tb.format_stack(_fr)
+                        _mine = [x for x in _st if "lingxi-v4\\app" in x or "\\app\\" in x]
+                        print("[loop-lag %.1fs]\n%s" % (
+                            _lag, "".join(_mine[-8:] or _st[-6:])), flush=True)
+
+            import threading as _th
+            _th.Thread(target=_watch, name="lag-watch", daemon=True).start()
+    except Exception as _exc:                                     # noqa: BLE001
+        print("loop watch 启动失败：%s" % _exc, flush=True)
+
     @app.get("/health")
     async def health():
+        # ★ 2026-11-20：这两个都实测 0.000 s，别加计时打印了 ✓
+        _d = desktop.diagnose()
+        _i = engine.info() if engine.model is not None else {"loaded": False}
         return {
             "status": "ok",
             "version": VERSION_ID,    # ★ 2026-10-23：版本号（小升级也要能看出来）
@@ -526,8 +582,10 @@ def create_app(cfg: Config, engine: EmbeddingEngine, store: Store | None = None)
             "uptime_seconds": round(time.time() - START_TIME, 1),
             "port": cfg.port,
             # 定位/打开文件能不能用，看这一项就知道
-            "desktop": desktop.diagnose(),
-            **(engine.info() if engine.model is not None else {"loaded": False}),
+            "desktop": _d,
+            # ★ 2026-11-20：启动不再阻塞加载嵌入模型，界面据此显示「模型加载中」
+            "model_ready": engine.model is not None,
+            **_i,
         }
 
     @app.get("/v1/models")
@@ -676,16 +734,31 @@ def create_app(cfg: Config, engine: EmbeddingEngine, store: Store | None = None)
         host = request.client.host if request.client else ""
         if host not in ("127.0.0.1", "::1", "localhost"):
             return {"ok": False}                              # 只对本机界面生效 ✓
+        # ★ 2026-11-20 项目主两条要求，一起满足：
+        #   ① "关闭后重新打开还是会无故断连" —— 5 秒太短，刷新时若正好在模型/矩阵预热，
+        #      请求排不过来就被误判成"关了" → 自杀 ✗
+        #   ② "Ctrl+W 退出界面，显存没清空" —— 但不能干脆不停，关窗得把显存还回去 ✓
+        #   做法：**宽限期**（默认 60 秒，EG2_UI_GRACE 可调）内只要收到心跳/请求就算刷新；
+        #   到期仍没动静 = 真关了 → 停服务、放显存 ✓
+        _quick = str(os.environ.get("EG2_UI_QUICKSTOP", "0")).strip().lower() in ("1", "yes", "true", "on")
+        try:
+            grace = float(os.environ.get("EG2_UI_GRACE", "") or 30.0)
+        except ValueError:
+            grace = 60.0
+        if _quick:
+            grace = 5.0
         app.state.last_seen = 0.0                             # 从"离开"这一刻起重新计时
         stamp = time.time()
 
         def _maybe_stop() -> None:
-            time.sleep(5.0)
-            seen = float(getattr(app.state, "last_seen", 0.0) or 0.0)
-            if seen > stamp:                                  # 期间有请求 → 是刷新，不是关闭 ✓
-                log.info("界面刷新（不是关闭），服务继续运行")
+            time.sleep(grace)
+            # ★ 只看**界面心跳**（/api/ui-alive），不看任意请求：
+            #   否则备份/同步/监控随便一个轮询就能把服务续命，关窗永远停不掉 ✗
+            alive = float(getattr(app.state, "ui_alive", 0.0) or 0.0)
+            if alive > stamp:                                 # 期间有界面心跳 → 是刷新 ✓
+                log.info("界面回来了（刷新/重开），服务继续运行")
                 return
-            log.info("界面已关闭 → 顺手停止服务")
+            log.info("界面已关闭 %.0f 秒且没有心跳 → 停止服务（释放显存）", grace)
             try:
                 server = app.state.server
                 if server is not None:
@@ -779,6 +852,10 @@ def main() -> int:
         #   网络盘（NAS）上 stat 一次可能几秒，19 个串起来十几秒 ——
         #   开机就预热，第一次打开文件夹页就不用干等 ✓
         def _warm_exists() -> None:
+            # ★ 2026-11-20：网络盘 stat 一次几秒、19 个串起来十几秒，开机就抢锁会把首屏拖死 ✗
+            #   现在 path_exists_cached 冷未命中会先当「还在」并后台刷新，
+            #   所以只要让路 3 秒（等 /api/folders 的内存缓存先出）就行 ✓
+            time.sleep(3)
             try:
                 store.list_folders(stats=False)     # 一次性把所有路径的 exists 缓存填上
                 log.info("文件夹可用性缓存已预热")
@@ -792,26 +869,63 @@ def main() -> int:
         #   这里每 45 秒替它算好，接口只读缓存（毫秒级）✓
         def _warm_stats() -> None:
             # ★ 2026-11-03：统计只在这里算（25~70 秒），界面永远读缓存 ✓
+            # ★ 2026-11-20：**开机别立刻算** —— 它会占着索引库那把锁算 25~70 秒，
+            #   首屏的 /api/folders 排在它后面，界面 30 秒超时报错（项目主实测"打开文件夹好慢"）✗
+            #   现在先让路 90 秒；meta 里已经有统计就直接跳过这一轮 ✓
+            time.sleep(90)
             while True:
                 try:
-                    # 先算「每个文件夹有多少文件」（0.2 秒级），首屏立刻可用 ✓
                     store.list_folders(stats=True, check_exists=False)
-                    # 再算全站统计（25~70 秒），界面读缓存，不等它 ✓
-                    store.warm_stats_json()
+                    if not getattr(store, "_stats_mem", None):
+                        store.warm_stats_json()
                 except Exception:                                # noqa: BLE001
                     pass
                 time.sleep(300)
 
         threading.Thread(target=_warm_stats, daemon=True).start()
 
+        # ★ 2026-11-20：向量矩阵（约 900 MB / 40 多万条）原本在**第一次搜索**时才读库，
+        #   冷启动那次要 30~60 秒，还会挡着其它读库的接口（界面就卡在「连接中…」）✗
+        #   启动后后台先读进内存，用户点搜索时就是热的 ✓
+        def _warm_matrix() -> None:
+            try:
+                time.sleep(8)
+                _t0 = time.time()
+                store._load_matrix()
+                log.info("向量矩阵已预热（%.1f 秒）", time.time() - _t0)
+            except Exception as exc:                 # noqa: BLE001
+                log.warning("预热向量矩阵失败（不影响使用）：%s", exc)
+
+        threading.Thread(target=_warm_matrix, daemon=True).start()
+
         # （检索预热已放到 filesearch.create_router 里 —— searcher 只在那个作用域可见）
     except Exception:  # noqa: BLE001
         log.exception("索引库初始化失败，文件搜索可能不可用")
-    try:
-        engine.load()
-    except Exception as exc:  # noqa: BLE001
-        log.error("模型加载失败：%s", exc)
-        return 2
+    # ★ 2026-11-20 项目主：「启动时一定要注入嵌入模型吗？一般只是对话/搜索/问答，
+    #   只有扫描入库才需要」—— 检索只用到 encoder，但**搜索也要**把问题变成向量，
+    #   所以不能真的等到入库才加载。折中：**启动不阻塞**，3 秒后后台加载 ✓
+    #   这样：页面 2 秒内出来（以前 38 秒），模型 40 秒左右就绪，期间搜索会等它。
+    #   要旧行为（启动就同步加载）设 EG2_LAZY_MODEL=0。
+    _lazy = str(os.environ.get("EG2_LAZY_MODEL", "1")).strip().lower() not in ("0", "no", "false", "off")
+    if _lazy:
+        log.info("启动策略：不阻塞加载嵌入模型（EG2_LAZY_MODEL=1），页面先起来")
+
+        def _lazy_model() -> None:
+            try:
+                time.sleep(float(os.environ.get("EG2_LAZY_DELAY", "") or 3))
+                _t0 = time.time()
+                engine.load()
+                log.info("嵌入模型已就绪（后台加载 %.1f 秒）", time.time() - _t0)
+            except Exception as exc:                     # noqa: BLE001
+                log.error("后台加载嵌入模型失败：%s", exc)
+
+        threading.Thread(target=_lazy_model, name="eg2-lazy-model", daemon=True).start()
+    else:
+        try:
+            engine.load()
+        except Exception as exc:  # noqa: BLE001
+            log.error("模型加载失败：%s", exc)
+            return 2
 
     app = create_app(cfg, engine, store)
 

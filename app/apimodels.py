@@ -100,8 +100,95 @@ def items_for(store, uid: int, viewer_name: str = "") -> list[dict]:  # noqa: AN
     return out
 
 
+# ============================================================ 一个网关、多个模型
+# 项目主 2026-11-20：「设置里选了像 opencode 这种**一个网关带一堆模型**的，
+# 应该跟 DSH 一样，前台能随便切模型」✓
+#   以前一个配置条目 = 一个模型（base_url + model），想换模型就得再加一条；
+#   现在条目里可以带 `models` 列表（或者干脆留空，自动问网关 /models 要）——
+#   前端看到的就是「网关名 · 模型名」一整列，点哪个用哪个 ✓
+_MODELS_CACHE: dict[str, tuple[float, list[str]]] = {}
+_MODELS_TTL = 600.0
+
+
+def fetch_models(base_url: str, api_key: str = "", headers: dict | None = None,
+                  timeout: float = 6.0) -> list[str]:
+    """问 `{base_url}/models` 要模型清单（缓存 10 分钟，失败也缓存空结果）。
+
+    opencode 那种网关的 `/models` 不用密钥也能列（实测 200）；
+    有的网关要密钥，就把它带上。宁可返回空，也不要让界面卡住 —— 超时 6 秒 ✓
+    """
+    import time as _t
+    import urllib.request
+
+    base = str(base_url or "").strip().rstrip("/")
+    if not base:
+        return []
+    hit = _MODELS_CACHE.get(base)
+    if hit and _t.time() - hit[0] < _MODELS_TTL:
+        return list(hit[1])
+    ids: list[str] = []
+    try:
+        hdr = {"Accept": "application/json", "User-Agent": "curl/8.4.0"}
+        if api_key:
+            hdr["Authorization"] = "Bearer " + str(api_key)
+        for k, v in (headers or {}).items():
+            hdr[str(k)] = str(v)
+        req = urllib.request.Request(base + "/models", headers=hdr)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        for m in (data.get("data") or data.get("models") or []):
+            mid = m.get("id") if isinstance(m, dict) else m
+            if str(mid or "").strip():
+                ids.append(str(mid).strip())
+    except Exception as exc:                                     # noqa: BLE001
+        log.info("列 %s 的模型失败（%s）", base, exc)
+        ids = []
+    _MODELS_CACHE[base] = (_t.time(), ids)
+    return list(ids)
+
+
+def models_of(item: dict | None) -> list[str]:
+    """这个配置条目能用的模型：显式 `models` → 问网关 → 至少给 `model` 本身。"""
+    if not item:
+        return []
+    raw = item.get("models")
+    out: list[str] = []
+    if isinstance(raw, list):
+        out = [str(x).strip() for x in raw if str(x).strip()]
+    elif isinstance(raw, str) and raw.strip():
+        for x in raw.replace("，", ",").replace("\n", ",").split(","):
+            if x.strip():
+                out.append(x.strip())
+    md = str(item.get("model") or "").strip()
+    if not out:
+        out = fetch_models(str(item.get("base_url") or ""),
+                           str(item.get("api_key") or ""), headers_of(item))
+    if md:
+        out = [x for x in out if x != md]
+        out.insert(0, md)
+    return out
+
+
+def expand(items: list[dict]) -> list[dict]:
+    """把「一个网关多条模型」摊平成「一条一个模型」，下标就是前端的 api:N。
+
+    `/api/chat2/models` 与真正发请求时都用这个函数，下标才对得上 ✓
+    """
+    out: list[dict] = []
+    for x in (items or []):
+        base = str(x.get("base_url") or "").strip()
+        if not base:
+            out.append(dict(x))
+            continue
+        for m in models_of(x):
+            y = dict(x)
+            y["model"] = m
+            out.append(y)
+    return out
+
+
 def by_index(store, uid: int, idx: int, viewer_name: str = "") -> dict | None:  # noqa: ANN001
-    items = items_for(store, uid, viewer_name)
+    items = expand(items_for(store, uid, viewer_name))
     if 0 <= int(idx) < len(items):
         return items[int(idx)]
     return None
@@ -130,3 +217,32 @@ def headers_of(item: dict | None) -> dict | None:
     except Exception:                                            # noqa: BLE001
         return None
     return d if isinstance(d, dict) else None
+
+def resolve(store, uid: int, ref: str, viewer: str = "") -> dict | None:   # noqa: ANN001
+    """把前端传来的 `api:N` 还原成一套**带密钥**的配置（密钥只在服务端用）。
+
+    打标页的下拉里放的是服务端摊平后的模型（浏览器拿不到密钥），
+    所以它只回传 `srv:api:N`，由这里补 base_url / model / api_key ✓
+    """
+    rid = str(ref or "").strip()
+    if not rid:
+        return None
+    if rid.startswith("srv:"):
+        rid = rid[4:]
+    items = expand(items_for(store, int(uid or 0), viewer))
+    for i, x in enumerate(items):
+        if rid in (("api:%d" % i), str(x.get("_id") or "")):
+            base = str(x.get("base_url") or "").strip()
+            model = str(x.get("model") or "").strip()
+            if not base or not model:
+                continue
+            hdr = x.get("headers")
+            if isinstance(hdr, str) and hdr.strip():
+                try:
+                    hdr = json.loads(hdr)
+                except Exception:                                # noqa: BLE001
+                    hdr = None
+            return {"base_url": base, "model": model,
+                    "api_key": str(x.get("api_key") or ""),
+                    "headers": hdr if isinstance(hdr, dict) else None}
+    return None

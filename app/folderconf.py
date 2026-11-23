@@ -188,29 +188,13 @@ _INT_KEYS = ("index_dim", "chunk_chars", "chunk_overlap", "max_chunks_per_file",
 #
 # cost 是"开销档位"，直接显示在界面上，让项目主一眼看出哪个最经济 ✓
 _BUILTIN = {
-    "find": {
-        "label": "文件夹模糊搜索",
+    "files": {
+        "label": "文件搜索",
         "icon": "🔍",
         "cost": "最经济",
         "desc": "只按文件名/路径找东西：不读内容、不解码图片，建库最快、几乎不占空间。",
         "mode": "name_only",
         "config": {"use_kb": False, "fast_scan": True},
-    },
-    "photo": {
-        "label": "照片库",
-        "icon": "🖼",
-        "cost": "省",
-        "desc": "看图找人：只索引图片并检出人脸（可在「人物」页命名），不解析文档文字。",
-        "mode": "photo",
-        "config": {"use_kb": False},
-    },
-    "graphic": {
-        "label": "图文库",
-        "icon": "📖",
-        "cost": "花时间",
-        "desc": "图文并茂的笔记/资料：文档文字 + 图片都索引，可搜可看，但不参与问答。",
-        "mode": "text_image",
-        "config": {"use_kb": False},
     },
     "kb": {
         "label": "知识库",
@@ -223,22 +207,31 @@ _BUILTIN = {
         "mode": "text_image",
         "config": {"use_kb": True, **KB_PRESET},
     },
-    "media": {
-        "label": "影音库",
-        "icon": "🎬",
-        "cost": "花时间",
-        "desc": "音视频转写 + 文字，不解码图片。",
-        "mode": "text_media",
+    "portrait": {
+        "label": "照片（人像）库",
+        "icon": "🖼",
+        "cost": "省",
+        "desc": "看图找人：只索引图片并检出人脸（可在「人物」页命名），不解析文档文字。",
+        "mode": "photo",
         "config": {"use_kb": False},
     },
-    "all": {
-        "label": "全都要",
-        "icon": "🗂",
-        "cost": "最占空间",
-        "desc": "文字 + 图片 + 音频 + 视频全索引。适合体积不大的混装文件夹。",
-        "mode": "full",
+    "custom": {
+        "label": "自定义",
+        "icon": "🛠",
+        "cost": "看你怎么配",
+        "desc": "自己选扫描方式与开关（文字/图片/音视频、维度、排除规则都随你）。",
+        "mode": "custom",
         "config": {},
     },
+}
+
+# 4.0 起只给 3 个固定用途 + 1 个自定义；老数据里的旧类别名照样能显示 ✓
+_LEGACY_CATS = {
+    "find": "files",
+    "photo": "portrait",
+    "graphic": "kb",
+    "media": "kb",
+    "all": "kb",
 }
 
 
@@ -408,7 +401,7 @@ def __getattr__(name: str):                                      # noqa: ANN202
         return _ACTIVE
     raise AttributeError(name)
 
-DEFAULT_CATEGORY = "find"          # 新增文件夹时的默认类别（最经济那个 ✓）
+DEFAULT_CATEGORY = "files"         # 新增文件夹时的默认类别（最经济那个 ✓）
 CATEGORY_NONE = ""                 # 未分类：老数据就是这个，行为完全不变 ✓
 
 
@@ -423,8 +416,14 @@ def categories_info() -> list[dict]:
             for key, c in active_categories().items()]
 
 
+def _resolve_cat(category: str | None) -> str:
+    """类别名归一：老 id（find/photo/graphic/media/all）→ 4.0 的固定预设 ✓"""
+    key = str(category or "").strip().lower()
+    return _LEGACY_CATS.get(key, key)
+
+
 def category_label(category: str | None) -> str:
-    cat = active_categories().get(str(category or "").strip().lower())
+    cat = active_categories().get(_resolve_cat(category))
     return cat["label"] if cat else "未分类"
 
 
@@ -445,7 +444,7 @@ def apply_category(override: dict | None, category: str | None,
       （维度是向量空间的属性，改它等于让已有片段全废 ✓ 所以能不动就不动 ✓）
     """
     result = dict(normalize(override))
-    cat = active_categories().get(str(category or "").strip().lower())
+    cat = active_categories().get(_resolve_cat(category))
     if not cat:
         return result
     # ★ 关键：类别给的 mode 必须**真正落地**成模态开关 ✓

@@ -47,6 +47,8 @@ class Indexer:
         self.cfg = cfg
         self.store = store
         self.engine = engine
+        # 4.0：某个文件夹扫完后的回调（服务器用它把内容同步进对应的知识库分库）
+        self.on_folder_done = None
         self._thread: threading.Thread | None = None
         self._cancel = threading.Event()
         self._warn_text = ""
@@ -483,6 +485,12 @@ class Indexer:
                      f"（{total_bytes / 1e6:.1f} MB）· {fcfg.summary()['label']}")
         self._index_files(folder_id, work, fcfg, sub_cfgs)
         self.store.set_folder_scan(folder_id, "idle")
+        if self.on_folder_done is not None:
+            # 4.0：这个文件夹归某个知识库时，顺手把它同步进分库（钩子失败不影响主流程）
+            try:
+                self.on_folder_done(folder_id)
+            except Exception as exc:                              # noqa: BLE001
+                log.warning("文件夹 %s 扫完后的钩子出错：%s", folder_id, exc)
         if warning:
             self._update(message=warning)
 

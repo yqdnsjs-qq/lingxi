@@ -285,8 +285,20 @@ ENGINES: dict[str, dict] = {
 }
 
 
-def list_engines() -> list[dict]:
-    """给界面用：哪些引擎现在可用 ✓"""
+_ENG_CACHE = {"at": 0.0, "value": []}          # 引擎可用性缓存（8 秒）★2026-11-20
+
+
+def list_engines(use_cache: bool = True) -> list[dict]:
+    """给界面用：哪些引擎现在可用 ✓
+
+    ★ 2026-11-20：这里会去连 OXR / MinerU 的 HTTP 探测，
+      界面每几秒拉一次 `/api/gpu/status`，探测一旦超时就**把事件循环堵住**，
+      表现是 /health 十几秒、界面「服务未就绪」✗
+      现在：结果缓存 8 秒 + 探测超时 0.8 秒，并且接口本身改同步（走出线程池）✓
+    """
+    now = time.time()
+    if use_cache and _ENG_CACHE["value"] and now - _ENG_CACHE["at"] < 8:
+        return list(_ENG_CACHE["value"])
     out = []
     for name, spec in ENGINES.items():
         ok = Path(spec["python"]).is_file() and Path(spec["bridge"]).is_file()
@@ -306,10 +318,11 @@ def list_engines() -> list[dict]:
             item["note"] = "需要 OXR 的三个服务在运行（1-启动 OXR.bat）"
             item["api_up"] = oxr_api_alive()
         out.append(item)
+    _ENG_CACHE.update({"at": now, "value": list(out)})
     return out
 
 
-def oxr_api_alive(timeout: float = 3.0) -> bool:
+def oxr_api_alive(timeout: float = 0.8) -> bool:
     """OXR 的解析服务（默认 127.0.0.1:8000）在跑吗。"""
     api = (_ini_ocr().get("oxr_api") or os.environ.get("EG2_OCR_OXR_API")
            or "http://127.0.0.1:8000")
@@ -320,7 +333,7 @@ def oxr_api_alive(timeout: float = 3.0) -> bool:
         return False
 
 
-def mineru_api_alive(timeout: float = 3.0) -> bool:
+def mineru_api_alive(timeout: float = 0.8) -> bool:
     """MinerU 的 API 在跑吗（认 /file_parse，避免把同端口的 OXR 误判成 MinerU）。"""
     import urllib.error
     import urllib.request

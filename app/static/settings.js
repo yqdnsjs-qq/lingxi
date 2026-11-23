@@ -151,6 +151,12 @@
           `<option value="${esc(o.value)}" ${String(o.value) === String(value) ? 'selected' : ''}>
             ${esc(o.label)}</option>`).join('')}</select>`;
       }
+      // ★ 2026-11-20：文本项（比如「服务器地址」能填多个、逗号分隔）以前落到 number 上，
+      //   浏览器直接报 "The specified value ... cannot be parsed, or is out of range." ✗
+      if (item.type === 'text') {
+        return `<input type="text" data-key="${item.key}" value="${esc(value)}"
+          placeholder="${esc(item.placeholder || '')}">`;
+      }
       return `<input type="number" data-key="${item.key}" value="${esc(value)}"
         min="${item.min}" max="${item.max}" step="${item.step || 1}">`;
     }
@@ -338,3 +344,26 @@
 
   window.EG2Settings = { mount };
 })();
+
+
+/* 分类知识库管理弹层（原先内联在 search.html 里，2026-11-23 挪出来：
+   自检要求 HTML 里不能有内联 script） */
+document.addEventListener('DOMContentLoaded', function () {
+  (function () {
+    var link = document.getElementById('kb-admin-link');
+    var mask = document.getElementById('kb-admin-mask');
+    var frame = document.getElementById('kb-admin-frame');
+    if (!link || !mask || !frame) return;
+    function openBox() {
+      if (frame.getAttribute('src') === 'about:blank') frame.setAttribute('src', '/static/kb.html?embed=1');
+      mask.style.display = 'block';
+    }
+    function closeBox() { mask.style.display = 'none'; }
+    link.addEventListener('click', function (e) { e.preventDefault(); openBox(); });
+    document.getElementById('kb-admin-close').addEventListener('click', closeBox);
+    mask.addEventListener('click', function (e) { if (e.target === mask) closeBox(); });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && mask.style.display === 'block') closeBox();
+    });
+  })();
+});

@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import asyncio
+import copy
 import io
 import json
 import logging
@@ -22,6 +24,7 @@ from typing import Any
 import numpy as np
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
+from starlette.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from . import desktop
@@ -332,6 +335,20 @@ def caption_model_cfg(store) -> dict | None:
             log.warning("自定义请求头解析失败（忽略）：%s", exc)
             return None
 
+    # ---- ⓪ 界面选了「服务端模型」（保存的是解析好的那套，含密钥）----
+    #   打标页下拉里列的是摊平后的网关模型，浏览器拿不到密钥，
+    #   所以启动时由服务端解析成这套存进 meta，后台/重启都还能用 ✓
+    try:
+        raw = store.get_meta("ui_pref.eg2-vlremote") or ""
+        got = json.loads(raw) if str(raw).strip() else None
+        if isinstance(got, dict) and got.get("base_url") and got.get("model"):
+            got.setdefault("max_side", 448)
+            got.setdefault("max_tokens", 800)
+            log.info("插图打标用的是「服务端模型」：%s", got.get("model"))
+            return got
+    except Exception as exc:                                     # noqa: BLE001
+        log.debug("打标服务端模型配置读不出来：%s", exc)
+
     # ---- ① 先按「打标模型」下拉来（项目主真正在改的那一项）----
     pick = _p("eg2-vlmodel")
     if pick.startswith("remote:"):
@@ -393,6 +410,14 @@ _NIGHT: dict = {"running": False, "note": "", "started": 0.0}
 def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: Indexer) -> APIRouter:
     router = APIRouter()
     searcher = Searcher(cfg, store, engine)
+
+    # 4.0：知识库管理接口（/api/kb…）。单独一个模块，主路由保持原样 ✓
+    try:
+        from .kbapi import register as _register_kb
+
+        _register_kb(router, cfg, store, engine, _local_open)
+    except Exception as exc:                                     # noqa: BLE001
+        log.warning("知识库接口没注册上：%s", exc)
 
     # ★ 2026-11-03：冷启动第一次搜索要 60 秒（45 万条名字向量要读进内存），
     #   用户会以为坏死了 ✗ → 建好路由就在后台热一次，第一次搜索就是秒级 ✓
@@ -1000,6 +1025,127 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                 "message": f"已保存：{len(cats)} 个类别"
                            f"（自定义 {sum(1 for c in cats if not c.get('builtin'))} 个）"}
 
+    # ---------- /api/folders 响应缓存（2026-11-20 项目主：「接口加缓存」） ----------
+    # 13 秒的根源是网络盘 + 统计聚合；这份数据几小时内几乎不变，没必要每次重算。
+    # 三种情况会重算：①缓存超过 60 秒（先给旧的，后台再刷）②folders 表被写过
+    # （store._touch_folders 打戳）③换了一个人/换了一种可见范围（key 不同）。
+    _FOLD_TTL = 300.0
+    _FOLD_CACHE: dict = {}
+    _FOLD_LOCK = threading.Lock()
+
+    def _folders_payload(vis, wset, vm) -> dict:
+        """算一次完整响应（同步、可能几秒；只在缓存没命中时跑）✓"""
+        def _list() -> list:
+            return [x for x in store.list_folders(check_exists=False)
+                    if (vis is None or int(x["id"]) in vis)
+                    and (wset is None or int(x["id"]) in wset)]
+
+        folders = _list()
+        # ★ 2026-11-21：哪些文件夹属于「上锁（不联网）」的知识库 —— 界面上要标 🔒，
+        #   免得在搜索页的下拉里选了半天却搜不到，还以为是 bug ✓
+        try:
+            from . import kbpolicy as _kbpol
+
+            _locked = _kbpol.offline_folder_ids(cfg, store)
+        except Exception as _exc:                                 # noqa: BLE001
+            log.warning("读取上锁文件夹失败：%s", _exc)
+            _locked = set()
+        for folder in folders:
+            folder["locked"] = int(folder["id"]) in _locked
+            fcfg = FolderConfig(cfg, folder.get("config"), engine)
+            folder["summary"] = fcfg.summary()
+            _cat = str(folder.get("category") or "")
+            folder["category"] = _cat
+            folder["category_label"] = FC.category_label(_cat)
+            folder["category_icon"] = (FC.CATEGORIES.get(_cat) or {}).get("icon", "•")
+            folder["writable"] = True
+            folder["privacy"] = bool(int(folder.get("privacy") or 0))
+            _p = str(folder.get("path") or "")
+            _win = bool(re.match(r"^[A-Za-z]:[\\/]", _p)) or _p.startswith("\\\\")
+            folder["path_kind"] = "windows" if _win else "posix"
+            if not folder.get("exists"):
+                folder["exists_reason"] = ("windows_path"
+                                           if (_win and not _can_index_here())
+                                           else "missing")
+        return {
+            "folders": folders,
+            "stats": store.stats_fast(),
+            "schema": FC.KEYS,
+            "modes": [{"id": key, "label": label} for key, label in FC.MODE_LABELS.items()],
+            "categories": FC.categories_info(),
+            "default_category": FC.DEFAULT_CATEGORY,
+            "default_dim": cfg.index_dim,
+            "can_index_here": _can_index_here(),
+            "is_builder": _can_index_here(),
+            "view_mode": vm,
+            "view_mode_label": _VIEW_LABELS.get(vm, ""),
+            "local_vl_ok": _can_index_here(),
+        }
+
+    def _folders_refresh(key, vis, wset, vm) -> None:
+        """后台重算（请求路径上不等它）✓"""
+        try:
+            data = _folders_payload(vis, wset, vm)
+        except Exception as exc:                                  # noqa: BLE001
+            log.warning("后台刷新文件夹列表失败：%s", exc)
+            return
+        with _FOLD_LOCK:
+            _FOLD_CACHE[key] = (time.time(), data)
+        try:
+            store.set_meta("folders_json", json.dumps(data, ensure_ascii=False))
+        except Exception:                                      # noqa: BLE001
+            pass
+
+    def invalidate_folders() -> None:
+        _KB_FIDS["ts"] = 0.0
+        _KB_FIDS["ids"] = []
+        with _FOLD_LOCK:
+            _FOLD_CACHE.clear()
+
+    def _warm_folders_cache() -> None:
+        """开机把「本机每个身份」的那份都算好，界面首屏直接命中 ✓
+
+        身份 = (uid, vm)。匿名和各账号的 vm 不一样（本机版 / 管理员版 / 成员版），
+        只预热一个 key，其他人首屏照样要等十几秒 ✗（2026-11-20 实测 9.7 秒）
+        """
+        stamp = store.fold_stamp()
+        combos = [(0, _view_mode("", True))]
+        try:
+            for row in store._query("SELECT id, role FROM users ORDER BY id"):   # noqa: SLF001
+                combos.append((int(row["id"]),
+                               _view_mode(str(row["role"] or ""), True)))
+        except Exception as exc:                                   # noqa: BLE001
+            log.warning("预热文件夹列表：读账号失败 %s", exc)
+        done = 0
+        for uid, vm in combos:
+            try:
+                data = _folders_payload(None, None, vm)            # 本机不限制可见范围
+            except Exception as exc:                               # noqa: BLE001
+                log.warning("预热文件夹列表失败（uid=%s）：%s", uid, exc)
+                continue
+            with _FOLD_LOCK:
+                _FOLD_CACHE[(uid, vm, None, None, stamp)] = (time.time(), data)
+            try:
+                store.set_meta("folders_json", json.dumps(data, ensure_ascii=False))
+            except Exception:                                  # noqa: BLE001
+                pass
+            done += 1
+        log.info("文件夹列表缓存已预热（%d 份 / 共 %d 个身份）", done, len(combos))
+
+    try:                                                          # 启动后 2 秒开跑，不挡服务
+        @router.on_event("startup")
+        async def _warm_folders_on_start() -> None:               # noqa: D401
+            async def _run() -> None:
+                await asyncio.sleep(2.0)
+                try:
+                    await run_in_threadpool(_warm_folders_cache)
+                except Exception:                             # noqa: BLE001
+                    pass
+
+            asyncio.create_task(_run())
+    except Exception:                                             # noqa: BLE001
+        pass
+
     @router.get("/api/folders")
     async def list_folders(request: Request):
         """文件夹**管理**列表。
@@ -1011,82 +1157,70 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         见 `_visible_folders`）—— 两件事分开：**能不能读 ≠ 列不列在管理页** ✓。
         """
         vis = _visible_folders(request)                       # 可读范围
+        _me = _who(request) or {}
+        _uid = int(_me.get("id") or 0)
         # 这台机器 + 当前登录的人 → 前端该显示"个人版 / 管理员版 / 成员版" ✓
-        _vm = _view_mode(str((_who(request) or {}).get("role") or ""),
-                         can_index=_can_index_here())
+        _vm = _view_mode(str(_me.get("role") or ""), can_index=_can_index_here())
         # 「自己拥有的」= 可写范围（管理员 None=不限制；匿名=空 ✓ 语义正好吻合）
         try:
             from .multiuser import writable_folder_ids as _writable
 
             # ★ 2026-10-21：本机（建库机）不限制 —— 本机的普通用户和管理员一样
             #   能看能改本机所有文件夹（项目主："只差能不能管服务器"）✓
-            wr = None if _local_open(cfg.local_strict) else _writable(cfg.db_path, _who(request))
+            wr = None if _local_open(cfg.local_strict) else _writable(cfg.db_path, _me)
             wset = None if wr is None else {int(x) for x in wr}
         except Exception as exc:                                  # noqa: BLE001
             log.warning("取可写文件夹失败，按「只看自己的」处理：%s", exc)
             wset = set()
+
+        key = (_uid, _vm,
+               None if wset is None else tuple(sorted(wset)),
+               None if vis is None else tuple(sorted(vis)),
+               store.fold_stamp())
+        _now = time.time()
+        with _FOLD_LOCK:
+            hit = _FOLD_CACHE.get(key)
+        log.debug("folders-cache uid=%s vm=%s w=%s vis=%s stamp=%s hit=%s",
+                 _uid, _vm,
+                 None if wset is None else len(wset),
+                 None if vis is None else len(vis),
+                 key[-1], bool(hit))
+        if hit and _now - hit[0] < _FOLD_TTL:
+            return copy.deepcopy(hit[1])
+        if hit:
+            # 过期了：这次先给旧的（毫秒级），后台刷新的给下一次 ✓
+            threading.Thread(target=_folders_refresh, args=(key, vis, wset, _vm),
+                             daemon=True).start()
+            return copy.deepcopy(hit[1])
+
+        # ★ 2026-11-20：冷启动第一次没有内存缓存。实测这一下要 100+ 秒
+        #   （等启动期预热线程放开库连接），界面 30 秒就超时报错 ✗
+        #   → 先用上次算好、存在 meta 里的那份（毫秒级），后台再刷新 ✓
+        try:
+            _raw = store.get_meta("folders_json")
+        except Exception:                                      # noqa: BLE001
+            _raw = None
+        if _raw:
+            try:
+                _old = json.loads(_raw)
+            except Exception:                                  # noqa: BLE001
+                _old = None
+            if _old:
+                log.info("文件夹列表：用上次的结果先顶上，后台重算")
+                threading.Thread(target=_folders_refresh, args=(key, vis, wset, _vm),
+                                 daemon=True).start()
+                with _FOLD_LOCK:
+                    _FOLD_CACHE[key] = (time.time() - _FOLD_TTL, _old)   # 标记过期，别挡着刷新
+                return copy.deepcopy(_old)
+
         # ★ 2026-11-03：目录存在性检查会走网络盘（一次几秒），
         #   直接放在 async 里会把整个事件循环堵住（健康检查都超时）✗
         #   → 丢到线程池里跑，界面和 /health 保持可用 ✓
         from starlette.concurrency import run_in_threadpool
-        # 用显式函数包一层：多行推导式没法写成 lambda ✓
-        def _list() -> list:
-            return [f for f in store.list_folders(check_exists=False)
-                    if (vis is None or int(f["id"]) in vis)
-                    and (wset is None or int(f["id"]) in wset)]
-
-        folders = await run_in_threadpool(_list)
-        for folder in folders:
-            fcfg = FolderConfig(cfg, folder.get("config"), engine)
-            folder["summary"] = fcfg.summary()
-            # 用途类别（2026-10-17）：老数据是空串 → 显示「未分类」✓ 行为不变 ✓
-            _cat = str(folder.get("category") or "")
-            folder["category"] = _cat
-            folder["category_label"] = FC.category_label(_cat)
-            folder["category_icon"] = (FC.CATEGORIES.get(_cat) or {}).get("icon", "•")
-            # 管理页里能看到的就是自己的 → 都能改 ✓（留着这个字段让前端逻辑统一）
-            folder["writable"] = True
-            # ★ 2026-10-20：🔒 隐私文件夹（内容永不出机器）—— 界面要能显示和切换 ✓
-            folder["privacy"] = bool(int(folder.get("privacy") or 0))
-            # ★ 2026-10-27：分清楚"这路径服务器上本来就没有"和"网络盘掉线了" ——
-            #   服务器是 Linux，建库机上的 `\\NAS\share` / `D:\x` 在它那儿当然不存在 ✗
-            #   原来一律显示"⚠ 目录不存在"，看着像故障（项目主就误会过）✓
-            _p = str(folder.get("path") or "")
-            _win = bool(re.match(r"^[A-Za-z]:[\\/]", _p)) or _p.startswith("\\\\")
-            folder["path_kind"] = "windows" if _win else "posix"
-            if not folder.get("exists"):
-                folder["exists_reason"] = ("windows_path"
-                                           if (_win and not _can_index_here())
-                                           else "missing")
-        # ★ 2026-11-03：这里必须用 stats_fast()（读缓存，毫秒级）。
-        #   用 store.stats() 会真去扫 68 万行，实测 70 秒 → 页面卡死 ✗
-        _st = store.stats_fast()
-        return {
-            "folders": folders,
-            "stats": _st,
-            "schema": FC.KEYS,
-            "modes": [{"id": key, "label": label} for key, label in FC.MODE_LABELS.items()],
-            # 类别清单也从后端给 ✓（定义只在 app/folderconf.py 一处 ✓）
-            "categories": FC.categories_info(),
-            "default_category": FC.DEFAULT_CATEGORY,
-            "default_dim": cfg.index_dim,
-            # ★ 2026-10-20 项目主："文件夹自定义映射服务器地址功能只需添加到本机版即可，
-            #   服务器版上不用" → 前端靠这个标志决定要不要显示「🔗 路径」按钮 ✓
-            #   判据和索引权限同一个（见 _can_index_here）✓
-            "can_index_here": _can_index_here(),
-            "is_builder": _can_index_here(),
-            # ★ 2026-10-20 项目主："本地版是希望个人专用（应该有管理员版可以统管全局，
-            #   与个人版区别）" → 这里算出"这台机器现在是什么形态"，前端据此显示不同界面 ✓
-            #   personal = 个人版（本机、就我自己用）：一切以"我"为中心，不显示多人管理
-            #   admin    = 管理员版（服务器/多人）：统管全局（用户、共享、索引、打标、备份）
-            #   member   = 成员版（服务器上的普通用户）：只看自己的 + 别人共享的
-            #   角色必须**在这里**取（`_who` 是闭包函数，模块级调不到，见 _view_mode 的注释）
-            "view_mode": _vm,
-            "view_mode_label": _VIEW_LABELS.get(_vm, ""),
-            # ★ 2026-10-21 项目主："服务器用户图片打标用API可行，服务器本地模型也变灰"
-            #   本机（建库机）才有 GPU + 本地 VL；服务器上只能走外部 API ✓
-            "local_vl_ok": _can_index_here(),
-        }
+        data = await run_in_threadpool(_folders_payload, vis, wset, _vm)
+        with _FOLD_LOCK:
+            _FOLD_CACHE[key] = (time.time(), data)
+        return copy.deepcopy(data)
 
     # ---------- 目录可用性重查（2026-10-27 项目主：NAS 重启滞后 → 显示"目录不存在"）
     def _mount_of(path: str) -> str:
@@ -1107,7 +1241,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
             return ""
 
     @router.get("/api/folders/recheck")
-    async def folders_recheck(request: Request):
+    def folders_recheck(request: Request):
         """立刻重查每个文件夹：在不在、挂载点还在不在。
 
         项目主 2026-10-27："NAS 重启滞后，导致网络连接 NAS 硬盘显示不存在" ——
@@ -1215,7 +1349,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         return None
 
     @router.post("/api/folders")
-    async def add_folders(request: Request, payload: dict = Body(...)):
+    def add_folders(request: Request, payload: dict = Body(...)):
         """支持一次添加多个文件夹：paths 数组（兼容旧的单个 path）。
 
         多人规则（设计文档 §1 + 项目主 2026-10-16 补充）：
@@ -1290,7 +1424,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         }
 
     @router.put("/api/folders/{folder_id}/config")
-    async def set_folder_config(request: Request, folder_id: int, payload: dict = Body(...)):
+    def set_folder_config(request: Request, folder_id: int, payload: dict = Body(...)):
         """保存文件夹配置。
 
         ⚠ 2026-10-17 事故与修复：这里原来是**整体替换** config ✗ ——
@@ -1402,7 +1536,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
 
 
     @router.get("/api/folders/{folder_id}/errors")
-    async def folder_errors(request: Request, folder_id: int,
+    def folder_errors(request: Request, folder_id: int,
                             limit: int = Query(500)):
         """这个文件夹里**具体哪些文件**出问题了（项目主 2026-10-18：
         "最好提示说明哪个文件出问题，我好针对它做出修改"）。
@@ -1446,7 +1580,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
 
 
     @router.put("/api/folders/{folder_id}/category")
-    async def set_folder_category(request: Request, folder_id: int,
+    def set_folder_category(request: Request, folder_id: int,
                                   payload: dict = Body(...)):
         """重新分类（项目主要求：可以设置重新分类 ✓）。
 
@@ -1508,7 +1642,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         }
 
     @router.put("/api/folders/categories")
-    async def set_folders_category(request: Request, payload: dict = Body(...)):
+    def set_folders_category(request: Request, payload: dict = Body(...)):
         """**批量**改用途归类（项目主 2026-10-18：多选了却没有统一设置的口子 ✗）。
 
         逐个套用该类别的经济默认（规则和单个改一样 ✓：只改口径相关的键，
@@ -1594,7 +1728,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         return out
 
     @router.post("/api/folders/config")
-    async def set_folders_config(request: Request, payload: dict = Body(...)):
+    def set_folders_config(request: Request, payload: dict = Body(...)):
         """批量给多个文件夹套用同一个模式。"""
         ids = [int(x) for x in (payload.get("folder_ids") or [])]
         if not ids:
@@ -1616,13 +1750,13 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                 "message": f"已更新 {len(changed)} 个文件夹的模式"}
 
     @router.delete("/api/folders/{folder_id}")
-    async def remove_folder(request: Request, folder_id: int):
+    def remove_folder(request: Request, folder_id: int):
         _need_folder_write(request, folder_id)
         store.remove_folder(folder_id)
         return {"ok": True}
 
     @router.post("/api/folders/remove")
-    async def remove_folders(request: Request, payload: dict = Body(...)):
+    def remove_folders(request: Request, payload: dict = Body(...)):
         ids = [int(x) for x in (payload.get("folder_ids") or [])]
         _folder_ids_error(request, ids)
         for folder_id in ids:
@@ -1666,8 +1800,8 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                         status_code=403,
                         detail="你名下还没有文件夹。先在「文件夹」页添加一个 ✓")
                 folder_ids = sorted(mine)
-        if engine.model is None:
-            raise HTTPException(status_code=503, detail="模型还没加载完，请稍候")
+        if not engine.wait_ready(180):                      # 等模型就绪（3 分钟内）
+            raise HTTPException(status_code=503, detail="嵌入模型还在加载，请稍后再试")
         force = bool(payload.get("force"))
         # ★ 时限（2026-10-19）：到点**优雅暂停**（做完当前文件就停，进度保留）✓
         #   可以给 "max_hours": 6，或者 "until": "07:00"（本地时间）
@@ -2286,7 +2420,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
 
     # ---------------- 本机 / 服务器 路径映射（2026-10-20，项目主要求）----------------
     @router.get("/api/folders/{folder_id}/paths")
-    async def get_folder_paths(folder_id: int, request: Request):
+    def get_folder_paths(folder_id: int, request: Request):
         """看这个文件夹的三个路径 + 自动建议 ✓
 
         项目主："我桌面版使用了 \\\\NAS\\photo\\家庭相册 这种网络文件夹，
@@ -2307,7 +2441,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                 "suggest_help": _sp.display_help(p["path"])}
 
     @router.put("/api/folders/{folder_id}/paths")
-    async def set_folder_paths(folder_id: int, request: Request,
+    def set_folder_paths(folder_id: int, request: Request,
                                payload: dict = Body(default={})):
         """设"本机实际目录"和"服务器实际目录"（都可留空 = 跟随默认）✓
 
@@ -2334,7 +2468,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
 
     # ---------------- 单份 PDF 的 OCR 页码（优先级最高，2026-10-19）----------------
     @router.get("/api/files/{file_id}/ocr-pages")
-    async def get_file_ocr_pages(file_id: int, request: Request):
+    def get_file_ocr_pages(file_id: int, request: Request):
         """看某份 PDF 单独设的页码范围 + 它的 OCR 进度 ✓"""
         _need_login(request)
         r = store.get_file(int(file_id))
@@ -2350,7 +2484,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                 "source": "自设" if (pf > 0 or pt > 0) else "跟随全局"}
 
     @router.put("/api/files/{file_id}/ocr-pages")
-    async def set_file_ocr_pages(file_id: int, request: Request,
+    def set_file_ocr_pages(file_id: int, request: Request,
                                  payload: dict = Body(default={})):
         """给**某一份** PDF 单独设页码范围 —— **优先级最高**（个别 > 全局）✓
 
@@ -2386,7 +2520,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                            f"进度已清零会重新按新范围做）" + msg}
 
     @router.get("/api/gpu/status")
-    async def gpu_status_api(request: Request):
+    def gpu_status_api(request: Request):      # 同步：里面有 nvidia-smi 与引擎探测，别堵事件循环 ✓
         """显卡现在被谁占着、有几个在排队 + 各 OCR 引擎可用性（界面显示用）✓
 
         项目主 2026-10-19："OCR 与打标同时进行，不是要撞显存吗？给个顺序" ✓
@@ -2402,7 +2536,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         return st
 
     @router.post("/api/index/plan")
-    async def index_plan(request: Request, payload: dict = Body(default={})):
+    def index_plan(request: Request, payload: dict = Body(default={})):
         """📋 **计划增量更新** —— 只算不做，把"接下来要干的事"列出来 ✓
 
         项目主 2026-10-19 的用法：白天放完文件点一下，看清单心里有数；
@@ -2488,8 +2622,8 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         """
         _need_builder(request)
         u = _need_login(request)
-        if engine.model is None:
-            raise HTTPException(status_code=503, detail="模型还没加载完，请稍候")
+        if not engine.wait_ready(180):                      # 等模型就绪（3 分钟内）
+            raise HTTPException(status_code=503, detail="嵌入模型还在加载，请稍后再试")
         if indexer.is_running():
             return {"started": False, "message": "已经有任务在跑"}
         if _NIGHT["running"]:
@@ -2719,7 +2853,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                      extra_headers=payload.get("headers") or None)
 
     @router.post("/api/remote/test")
-    async def remote_test(request: Request, payload: dict = Body(...)):
+    def remote_test(request: Request, payload: dict = Body(...)):
         """用外部模型给一张现成的图写描述，验证它到底能不能看图。
 
         多人：同 remote/probe，属全局设置 + 会读一张图 → 只有管理员 ✓
@@ -2772,7 +2906,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
     #     /api/vl/*       = 给**图片文件**打描述（app/caption.py，会挪嵌入模型腾显存）
     #     /api/caption/queue/* = 给 **PDF 里的插图**打描述（caption_queue，外部 API 可并行）
     @router.get("/api/caption/queue/status")
-    async def caption_queue_status(request: Request):
+    def caption_queue_status(request: Request):
         _need_login(request)
         from . import caption_run as _cr
         st = _cr.run_state()
@@ -2783,7 +2917,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         return st
 
     @router.get("/api/caption/queue/files")
-    async def caption_queue_files(request: Request, folder_ids: str = ""):
+    def caption_queue_files(request: Request, folder_ids: str = ""):
         """队列里"还有待办"的文件清单（界面选文件用）✓
 
         项目主 2026-10-20："pdf打标按钮需要指定文件，不能每次只能全部"
@@ -2806,7 +2940,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                 "privacy_folders": sorted(priv)}
 
     @router.post("/api/caption/queue/file-model")
-    async def caption_queue_file_model(request: Request, payload: dict = Body(...)):
+    def caption_queue_file_model(request: Request, payload: dict = Body(...)):
         """设置**某一份文件**的打标模型（'' 跟随文件夹 / local / remote）✓
 
         项目主："针对我某些文件隐私效果需要用到本地"
@@ -2828,7 +2962,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         return {"ok": True, "updated": n, "model": model}
 
     @router.put("/api/folders/{folder_id}/privacy")
-    async def set_folder_privacy(request: Request, folder_id: int,
+    def set_folder_privacy(request: Request, folder_id: int,
                                  payload: dict = Body(default={})):
         """🔒 隐私文件夹开关（内容**永不出这台机器**）✓
 
@@ -2851,7 +2985,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                          if on else "已取消隐私标记")}
 
     @router.get("/api/folders/{folder_id}/privacy")
-    async def get_folder_privacy(request: Request, folder_id: int):
+    def get_folder_privacy(request: Request, folder_id: int):
         _need_login(request)
         if store.get_folder(int(folder_id)) is None:
             raise HTTPException(status_code=404, detail="文件夹不存在")
@@ -2879,6 +3013,19 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         except (TypeError, ValueError):
             limit = 0
         remote = _remote_caption_cfg()
+        _srv = str(payload.get("srv") or "").strip()
+        if _srv and _srv != "local":
+            from . import apimodels as _am
+            _me = _who(request) or {}
+            _got = _am.resolve(store, int(_me.get("id") or 0), _srv)
+            if _got:
+                _got.update({"max_side": 448, "max_tokens": 800})
+                remote = _got
+                try:
+                    store.set_meta("ui_pref.eg2-vlremote",
+                                   json.dumps(_got, ensure_ascii=False))
+                except Exception:                                # noqa: BLE001
+                    pass
         vldir = None if remote else _vl_model_dir()
         # 有隐私文件夹时，即使没配外部模型也得能跑（走本地）✓
         if not remote and not vldir:
@@ -2950,6 +3097,26 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
             win = None
         # 用外部模型打标（不走本机 VL，不占显存）
         remote = payload.get("remote") or None
+        srv = str(payload.get("srv") or "").strip()
+        if srv and srv != "local":
+            from . import apimodels as _am
+            me = _who(request) or {}
+            remote = _am.resolve(store, int(me.get("id") or 0), srv)
+            if not remote:
+                raise HTTPException(status_code=400,
+                                    detail="这套服务端模型的配置找不到了（可能已在设置里删除）")
+            remote.update({"max_side": 448, "max_tokens": 800})
+        if remote:
+            try:
+                store.set_meta("ui_pref.eg2-vlremote",
+                               json.dumps(remote, ensure_ascii=False))
+            except Exception:                                    # noqa: BLE001
+                pass
+        elif srv == "local":
+            try:
+                store.set_meta("ui_pref.eg2-vlremote", "")
+            except Exception:                                    # noqa: BLE001
+                pass
         if remote and not remote.get("base_url"):
             raise HTTPException(status_code=400, detail="外部模型要填地址")
         # 找出 VL 模型目录（不能用配置里的文本模型，它看不到图）
@@ -2990,7 +3157,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                 "hint": ("不勾「用外部模型打标」→ 用本机这个视觉模型 ✓；"
                          "勾了 → 用「外部模型」卡里选中的那个（那个必须支持看图）")}
 
-    async def vl_skip_list():
+    def vl_skip_list():
         """看被跳过多少张坏图（只含解码失败的）。"""
         try:
             store.ensure_caption_skip()
@@ -3006,7 +3173,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @router.post("/api/vl/skip/clear")
-    async def vl_skip_clear(request: Request):
+    def vl_skip_clear(request: Request):
         """清空跳过名单 —— 换模型/换网络/修好文件后可以重来。
 
         注意：这是安全的，因为名单里只有「解码就失败」的图；
@@ -3051,7 +3218,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         return info
 
     @router.post("/api/backup")
-    async def backup_now(request: Request):
+    def backup_now(request: Request):
         """立即备份一份索引库（在线备份，不影响使用）。
 
         多人：备份是整个索引库（含所有人的私有数据）→ 只有管理员 ✓
@@ -3130,7 +3297,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         return {"ok": True, "deleted": name, "freed": size}
 
     @router.get("/api/index/status")
-    async def index_status():
+    def index_status():
         # ★ 2026-11-03：stats() 是 5 个聚合查询（2GB 库上要几秒），
         #   直接放在 async 里会把事件循环堵死 → /health 都超时 ✗
         #   丢线程池跑，页面与监控始终可用 ✓
@@ -3140,7 +3307,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
 
     # ---------------------------------------------------------- 搜索
     @router.get("/api/search")
-    async def do_search(
+    def do_search(
         request: Request,
         q: str = Query("", description="查询内容（可以只给人物，不给关键词）"),
         top_k: int = Query(30, ge=1, le=200),
@@ -3148,12 +3315,44 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         exts: str = Query("", description="逗号分隔的后缀，如 .pdf,.docx"),
         persons: str = Query("", description="逗号分隔的人物 id —— 混合搜索用"),
         person_mode: str = Query("filter", description="filter=只保留含此人的；boost=加分不排除"),
+        kb: str = Query("", description="4.0 知识库 slug，逗号分隔；不给=只搜主库"),
     ):
-        if q.strip() and engine.model is None:
-            raise HTTPException(status_code=503, detail="模型还没加载完，请稍候")
+        # ★ 2026-11-20：4.0 起启动不阻塞加载嵌入模型，所以这里**等一下**
+        #   （最多 120 秒，期间页面在转圈）比直接甩 503 体验好 ✓
+        if q.strip() and not engine.wait_ready(120):
+            raise HTTPException(status_code=503, detail="嵌入模型还在加载，请稍后再试")
         ids = [int(x) for x in folder_ids.split(",") if x.strip().isdigit()] or None
         ext_list = [e.strip().lower() for e in exts.split(",") if e.strip()] or None
         pids = [int(x) for x in persons.split(",") if x.strip().isdigit()] or None
+        kb_slugs = [s.strip() for s in kb.split(",") if s.strip()]
+        if kb_slugs:
+            # 4.0：按知识库搜。**没授权的库根本不 open**（权限即隔离，不是先查再过滤）
+            from .kb import KbHub
+            from .kbsearch import search_kbs
+
+            hub = KbHub(cfg, store)
+            who = _who(request)
+            uid = int((who or {}).get("id") or 0)
+            _cli = str(getattr(request.client, "host", "") or "")
+            allowed = set(hub.allowed_slugs(uid if uid else None,
+                                            local=_cli in ("127.0.0.1", "::1", "localhost")))
+            wanted = [s for s in kb_slugs if s in allowed]
+            denied = [s for s in kb_slugs if s not in allowed]
+            if not wanted:
+                return {"query": q, "count": 0, "results": [], "elapsed": 0.0,
+                        "kbs": [], "kb_denied": denied,
+                        "detail": "这些知识库没有开放给你"}
+            data = search_kbs(cfg, hub, engine, wanted, q, top_k=top_k, exts=ext_list)
+            data["kb_denied"] = denied
+            titles = {r["slug"]: r["title"] for r in hub.rows()}
+            for item in data["results"]:
+                item["folder_mode"] = "知识库"
+                item["folder"] = titles.get(item.get("kb"), item.get("kb"))
+            return data
+        # 2026-11-21 项目主：「搜索项需要通过模型实现吗？…不连外网就没事」
+        #   对：搜索只用**本机**嵌入模型算向量，不发任何请求出去 ✗→✓
+        #   所以搜索页**不**排除上锁库（只在界面上标 🔒）；「不联网」只约束聊天/问答
+        #   那一步（片段要交给对话模型，可能是公网）。剔除逻辑在 app/chat_api.py ✓
         try:
             if pids:
                 # 带人物条件 → 走混合搜索（文件名 + 语义 + 人物 融合排序）
@@ -3199,7 +3398,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
 
     # ======================================================== 人脸 / 人物
     @router.get("/api/faces/status")
-    async def faces_status(request: Request):
+    def faces_status(request: Request):
         """人脸功能是否可用、索引里有多少张脸。
 
         ⚠ 参数 request 不能省：过滤可见性要用它取当前用户
@@ -3213,7 +3412,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                 "enabled": bool(cfg.face_enabled), **stats}
 
     @router.get("/api/people")
-    async def people_list(request: Request,
+    def people_list(request: Request,
                           kind: str = Query("", description="person / object，留空返回全部")):
         vis = _visible_folders(request)
         rows = store.list_people() if vis is None else _people_scoped(vis)
@@ -3317,7 +3516,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                 "objects": [r for r in rows if r["kind"] == "object"]}
 
     @router.put("/api/people/{person_id}")
-    async def people_rename(request: Request, person_id: int, payload: dict = Body(...)):
+    def people_rename(request: Request, person_id: int, payload: dict = Body(...)):
         rows = store.list_people(stats=False)
         if not any(r["id"] == person_id for r in rows):
             raise HTTPException(status_code=404, detail="没有这个人物")
@@ -3333,7 +3532,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         return {"ok": True}
 
     @router.get("/api/people/{person_id}/faces")
-    async def person_faces(request: Request, person_id: int, limit: int = Query(60),
+    def person_faces(request: Request, person_id: int, limit: int = Query(60),
                            offset: int = Query(0)):
         """列出某个人的所有脸，用来手动挑一张当封面。
 
@@ -3400,7 +3599,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                 "total": total, "offset": off, "limit": n}
 
     @router.delete("/api/faces/{face_id}/drop")
-    async def face_drop(request: Request, face_id: int):
+    def face_drop(request: Request, face_id: int):
         """彻底删掉一条人脸记录 —— 用于「这根本就不是脸」的误检。
 
         和 /person 的区别：
@@ -3432,7 +3631,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         return {"ok": True, "dropped": face_id, "was_person": pid}
 
     @router.delete("/api/faces/{face_id}/person")
-    async def face_detach(request: Request, face_id: int):
+    def face_detach(request: Request, face_id: int):
         """把一张人脸从它所属的人物身上摘下来（归错了时用）。
 
         摘掉后它变成「未归属」，可以在界面上点「重新聚类」重新进组。
@@ -3460,7 +3659,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         return {"ok": True, "face_id": face_id, "was_person": old}
 
     @router.put("/api/people/{person_id}/cover")
-    async def person_set_cover(request: Request, person_id: int, payload: dict = Body(...)):
+    def person_set_cover(request: Request, person_id: int, payload: dict = Body(...)):
         """把某张脸设成这个人物的封面（头像）。"""
         _need_people_write(request, person_id)                 # 人不是我的 → 403 ✓
         face_id = int(payload.get("face_id") or 0)
@@ -3479,7 +3678,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         return {"ok": True, "person_id": person_id, "cover_face": face_id}
 
     @router.post("/api/people/{person_id}/detach-all")
-    async def person_detach_all(request: Request, person_id: int):
+    def person_detach_all(request: Request, person_id: int):
         """整组解散：把这个人物名下的所有脸都变成「未归属」。
 
         用于「这一组整个都认错了」的情况 —— 解散后点「重新聚类」重新分。
@@ -3496,7 +3695,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         return {"ok": True, "detached": int(n)}
 
     @router.post("/api/people/dedup")
-    async def people_dedup(request: Request):
+    def people_dedup(request: Request):
         """把所有同名的人物组合并成一组（保留脸最多的那组）。
 
         同名多组会让「按人物筛选」莫名其妙地漏掉一半照片，
@@ -3533,7 +3732,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         return {"ok": True, "names": len(rows), "merged": merged}
 
     @router.post("/api/people/merge-similar")
-    async def people_merge_similar(request: Request, payload: dict = Body(default={})):
+    def people_merge_similar(request: Request, payload: dict = Body(default={})):
         """把「未命名的整组」并进最像的「已命名人物」。
 
         针对的问题是：聚类门槛一严，同一个人会被拆成好几组。
@@ -3627,7 +3826,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                 "preview": plan[:25]}
 
     @router.post("/api/people/people-merge")
-    async def people_merge(request: Request, payload: dict = Body(...)):
+    def people_merge(request: Request, payload: dict = Body(...)):
         """把几组合并成一组（同一个人被拆开时用）。
 
         多人：合并会改到被并入那几组的人名/封面 → 两组的脸都必须归我 ✓
@@ -3648,7 +3847,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         return {"ok": True, "merged": len(sources)}
 
     @router.post("/api/people/rebuild")
-    async def people_rebuild(request: Request, payload: dict = Body(default={})):
+    def people_rebuild(request: Request, payload: dict = Body(default={})):
         """把所有人脸重新聚类成「人物」组。已有命名会按多数归属沿用。
 
         多人：重建会**重写全部**人物分组（含共享库）→ 只有管理员 ✓
@@ -3659,7 +3858,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         return {"ok": True, **res, "people": len(store.list_people(stats=False))}
 
     @router.post("/api/people/assign")
-    async def people_assign(request: Request, payload: dict = Body(default={})):
+    def people_assign(request: Request, payload: dict = Body(default={})):
         """按已命名的人脸中心，把每张脸归类（未命名的脸也能归到最像的人）。
 
         多人：同 rebuild，整库动作 → 只有管理员 ✓
@@ -3670,7 +3869,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         return {"ok": True, **res}
 
     @router.get("/api/faces/{face_id}/thumb")
-    async def face_thumb(face_id: int, w: int = 160):
+    def face_thumb(face_id: int, w: int = 160):
         """从原图里裁出这张脸，作为人物头像。"""
         rows = store._query("SELECT * FROM faces WHERE id=?", (face_id,))
         if not rows:
@@ -3854,7 +4053,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                 "gpu": _gpu_free_mb()}
 
     @router.post("/api/chat/model")
-    async def chat_set_model(request: Request, payload: dict = Body(...)):
+    def chat_set_model(request: Request, payload: dict = Body(...)):
         """切换对话模型。会先卸下当前模型腾显存，下次提问时加载新的。
 
         多人：换模型影响所有人的问答 → 只有管理员 ✓
@@ -4104,8 +4303,12 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         return out
 
     @router.get("/api/chat/status")
-    async def chat_status():
-        """对话模型是否就绪（本机模型 + 界面里配好的外部模型）。"""
+    def chat_status():
+        """对话模型是否就绪（本机模型 + 界面里配好的外部模型）。
+
+        ★ 2026-11-20：改同步（丢线程池）。原来是 async，里面 _kb_folder_ids()
+        会读文件夹表；网络盘一慢就把事件循环按住几十秒，整站跟着假死 ✗
+        """
         eng = _chat_engine()
         ok, why = eng.available()
         remote = _prefs_remote()
@@ -4166,7 +4369,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                 "max_tokens": _num("eg2-rmtok", 800)}
 
     @router.post("/api/chat")
-    async def chat_ask(request: Request, payload: dict = Body(...)):
+    def chat_ask(request: Request, payload: dict = Body(...)):
         """知识库问答：只检索标了 use_kb 的文件夹，回答带引用编号。"""
         import time as _t
 
@@ -4181,6 +4384,25 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         #   现在前端多一个「☁ Dify」开关，勾上就多查一次 Dify，
         #   结果和本库片段一起进提示词：本库标 [K1]…，Dify 标 [D1]… ✓
         use_dify = bool(payload.get("dify"))
+
+        # 4.0：选了分类知识库 → 检索范围收窄到这些库挂的文件夹（不选就维持老的 use_kb 全集）✓
+        _kbs_req = [str(x).strip() for x in (payload.get("kbs") or []) if str(x).strip()]
+        if _kbs_req:
+            from .kb import KbHub as _KbHub                      # noqa: PLC0415
+
+            _u0b = _who(request) or {}
+            _hub0 = _KbHub(cfg, store)
+            _cli0 = str(getattr(request.client, "host", "") or "")
+            _allow = set(_hub0.allowed_slugs(int(_u0b.get("id") or 0) or None,
+                                             local=_cli0 in ("127.0.0.1", "::1", "localhost")))
+            _want = [s for s in _kbs_req if s in _allow]
+            if not _want:
+                raise HTTPException(status_code=403, detail="这些知识库没有开放给你")
+            _fids: list[int] = []
+            for _s in _want:
+                _fids += [int(f["folder_id"]) for f in _hub0.folders_of(_s)]
+            if _fids:
+                payload["folder_ids"] = sorted(set(_fids))
 
         # ---- 先决定用哪个模型（三段语义，勾选框必须仍然有效）----
         #   ① 勾了「用外部模型回答」→ 前端把 remote 一起发过来，一定用外部
@@ -4230,6 +4452,16 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                            f"也可以在「设置 → 外部模型」里填一个外部模型"
                            f"（服务器上没显卡时就用它，不需要本机模型）。")
         use_remote = bool(remote)
+        _forced_note = ""
+        if _kbs_req and remote:                            # 4.0 隐私：上锁库 → 强制本机模型
+            from . import kbpolicy as _kbp4                      # noqa: PLC0415
+
+            _forced_note = _kbp4.force_local(
+                cfg, store, _kbs_req, str(remote.get("base_url") or ""))
+            if _forced_note:
+                remote = None
+                use_remote = False
+                auto_note = _forced_note
         if engine.model is None:
             raise HTTPException(status_code=503, detail="嵌入模型还没加载完")
 
@@ -4237,7 +4469,11 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         # ---- 知识库隔离（多人 P2-b）：范围收窄到"这个用户能看到的" ----
         # 默认的全部知识库文件夹、以及前端显式点名的，都要过这一道 ✓
         # （不然可以手写 folder_ids 去引用别人的私有文件夹 ✗）
-        kb_ids = _scope_kb(kb_ids, request)
+        # 4.0：本机免登录（开发副本）没有"用户"，库的 ACL 刚已经过了 →
+        #      只对本机 loopback 放行；别处的匿名请求照旧只给共享 ✓
+        _anon_local = (not _who(request)) and \
+            str(getattr(request.client, "host", "") or "") in ("127.0.0.1", "::1")
+        kb_ids = kb_ids if _anon_local else _scope_kb(kb_ids, request)
         if not kb_ids:
             raise HTTPException(
                 status_code=400,
@@ -4400,16 +4636,28 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         }
 
     # ======================================================== 知识库
+    _KB_FIDS: dict = {"ts": 0.0, "ids": []}
+
     def _kb_folder_ids() -> list[int]:
-        """哪些文件夹被标成了「知识库」。"""
+        """哪些文件夹被标成了「知识库」。
+
+        ★ check_exists=False：只读库里的配置，不碰网络盘（这个函数到处被调用，
+        每次 stat 22 个 \\NAS 路径会拖死首屏）✓
+        ★ 60 秒缓存：/api/chat/status 每 15 秒就问一次，别每次都去抢库锁 ✓
+        """
+        _now = time.time()
+        if _KB_FIDS["ids"] and _now - _KB_FIDS["ts"] < 60.0:
+            return list(_KB_FIDS["ids"])
         out = []
-        for row in store.list_folders(stats=False):
+        for row in store.list_folders(stats=False, check_exists=False):
             if FolderConfig(cfg, row.get("config")).use_kb:
                 out.append(int(row["id"]))
+        _KB_FIDS["ts"] = _now
+        _KB_FIDS["ids"] = list(out)
         return out
 
     @router.get("/api/kb/folders")
-    async def kb_folders(request: Request):
+    def kb_folders(request: Request):
         # 多人隔离：只列可见的（私有文件夹的路径和"是不是知识库"都不该给别人看 ✓）
         vis = _visible_folders(request)
         rows = [r for r in store.list_folders(stats=False)
@@ -4559,7 +4807,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
             raise HTTPException(status_code=500, detail=f"预览失败：{exc}") from exc
 
     @router.post("/api/kb/retrieve")
-    async def kb_retrieve(request: Request, payload: dict = Body(...)):
+    def kb_retrieve(request: Request, payload: dict = Body(...)):
         """检索预览：只查「知识库」文件夹里的文字片段。
 
         这是做问答前必须先过的一关 —— 如果这里检索出来的片段
@@ -4702,7 +4950,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
         return picked
 
     @router.get("/dify/info")
-    async def dify_info(request: Request):
+    def dify_info(request: Request):
         """自查用：密钥对不对、有哪些知识库、模型好了没。
         （Dify 只用 /dify/retrieval，这个接口是给人排错用的）"""
         _dify_check_key(request)
@@ -4778,7 +5026,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
 
     # ======================================================== 索引库热重载
     @router.post("/api/admin/reload-db", include_in_schema=False)
-    async def admin_reload_db(request: Request):
+    def admin_reload_db(request: Request):
         """把索引库换成新文件，让服务重新打开它 —— **不用重启**。
 
         为什么需要：本机（有显卡）负责建库，服务器负责提供服务。本机把新的
@@ -4836,7 +5084,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                 "counts": counts}
 
     @router.post("/api/faces/backfill")
-    async def faces_backfill(request: Request, payload: dict = Body(default={})):
+    def faces_backfill(request: Request, payload: dict = Body(default={})):
         """只给「已索引但没有人脸数据」的图片补提人脸。
 
         不重新编码、不重跑语义向量 —— 只跑人脸提取，比全部重建索引快得多。
@@ -5117,7 +5365,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
 
     # ---------------------------------------------------------- 默认排除目录（设置项）
     @router.get("/api/settings/sync")
-    async def get_sync(request: Request):
+    def get_sync(request: Request):      # 同步：里面要探测服务器连通性，别堵事件循环 ✓
         """读「服务器地址」。支持多个地址，返回每个的连通性（自适应用）。"""
         _need_admin_or_local(request)
         from . import syncpush
@@ -5253,7 +5501,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                     str((_who(request) or {}).get("role") or ""))}
 
     @router.put("/api/settings/sync")
-    async def set_sync(request: Request, payload: dict = Body(...)):
+    def set_sync(request: Request, payload: dict = Body(...)):      # 同步：里面有连通性探测 ✓
         """改服务器地址 / 同步凭据：写 config.ini → 立刻生效 ✓，并试连一下报结果。
 
         凭据三选一（`app/syncpush.py` 的优先级）：
@@ -5550,15 +5798,23 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
             where, args = "1=1", ()
         else:
             where, args = "COALESCE(f.owner_id,0)=?", (uid,)
-        rows = store._query(                                    # noqa: SLF001
+        # ★ 2026-11-20：这里原来是「每个文件夹一个相关子查询」+ 走共享连接（带 RLock），
+        #   22 个文件夹 × 62 万行的 COUNT/SUM 要 20 秒+，整段时间锁都在手里 ✗
+        #   → 改成两次 GROUP BY（只读连接，不抢锁）✓
+        rows = store._query_ro(                                 # noqa: SLF001
             "SELECT f.id, f.path, f.visibility, f.privacy, "
             "       COALESCE(f.owner_id,0) AS owner_id, f.category, "
-            "  (SELECT COUNT(*) FROM files fi WHERE fi.folder_id=f.id) AS n_files, "
-            "  (SELECT COUNT(*) FROM chunks ch JOIN files fi ON fi.id=ch.file_id "
-            "     WHERE fi.folder_id=f.id) AS n_chunks, "
-            "  (SELECT COALESCE(SUM(fi.size),0) FROM files fi "
-            "     WHERE fi.folder_id=f.id) AS bytes "
-            "FROM folders f WHERE " + where + " ORDER BY f.id", args)
+            "       COALESCE(a.n_files,0) AS n_files, "
+            "       COALESCE(b.n_chunks,0) AS n_chunks, "
+            "       COALESCE(a.bytes,0) AS bytes "
+            "FROM folders f "
+            "LEFT JOIN (SELECT folder_id, COUNT(*) AS n_files, "
+            "                  COALESCE(SUM(size),0) AS bytes "
+            "             FROM files GROUP BY folder_id) a ON a.folder_id=f.id "
+            "LEFT JOIN (SELECT fi.folder_id AS fid, COUNT(*) AS n_chunks "
+            "             FROM chunks ch JOIN files fi ON fi.id=ch.file_id "
+            "            GROUP BY fi.folder_id) b ON b.fid=f.id "
+            "WHERE " + where + " ORDER BY f.id", args)
         items = []
         for r in rows:
             items.append({
@@ -5785,7 +6041,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
             return 0
 
     @router.get("/api/ui-prefs")
-    async def ui_prefs_get(request: Request):
+    def ui_prefs_get(request: Request):    # 同步：里面是 SQLite 读，别堵事件循环 ✓
         """界面偏好（卡片/分区的折叠状态、上次的标签页、视图模式…）。
 
         浏览器本来存在 localStorage 里，但 stop.bat 用 taskkill /f 关浏览器窗口，
@@ -5807,7 +6063,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                 "scope": ("global" if _uid == 0 else ("admin" if _adm else "user"))}
 
     @router.post("/api/ui-prefs")
-    async def ui_prefs_set(request: Request, payload: dict = Body(...)):
+    def ui_prefs_set(request: Request, payload: dict = Body(...)):    # 同步理由同上
         """保存界面偏好。只收 eg2- 开头的键，别的键一律不写。
 
         多人版：写进**当前登录用户**名下；未登录时写全局（兼容老行为）✓
@@ -5909,7 +6165,7 @@ def create_router(cfg: Config, store: Store, engine: EmbeddingEngine, indexer: I
                         headers={"Cache-Control": "private, max-age=600"})
 
     @router.get("/api/preview/{file_id}/pdf-hits")
-    async def preview_pdf_hits(file_id: int, q: str = Query("", description="要定位的文字"),
+    def preview_pdf_hits(file_id: int, q: str = Query("", description="要定位的文字"),
                                max_pages: int = 300):
         """在 PDF 里按字面定位文字：第几页、页内哪个位置。
 

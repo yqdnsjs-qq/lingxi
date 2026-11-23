@@ -1,0 +1,44 @@
+宇之语·灵犀 4.0.0 安装 / 升级说明
+=========================================
+
+一、这个包能干什么
+------------------
+双击「安装升级.bat」（或直接双击同名 .exe）就行，它会自己判断：
+
+  · 这台机器上已经装过灵犀  → 就地升级（程序换成 4.0.0，数据一条不动）
+  · 没装过                   → 全新安装（铺好文件，再按提示跑 setup.bat）
+
+升级时它做的事：
+  1. 先停掉正在跑的灵犀服务（调 /admin/shutdown，兜底按进程杀）
+  2. 把旧的 app\ + config.ini + VERSION 压进 backups\upgrade-v旧版本-时间.zip
+  3. 用新文件覆盖 app\ run\ docs\ 和根目录脚本
+  4. data\（索引库 + 知识库分库）、models\、venv\、config.ini、logs\ 一律不碰
+  5. 依赖清单（requirements.txt）变过才 pip install
+  6. 启动新版本（首次要等模型加载 40~120 秒）
+
+二、装在哪
+----------
+默认自动找：D:\GJ\lingxi、D:\lingxi、D:\GJ\embeddinggemma-2、
+D:\lingxi、D:\lingxi、C:\lingxi，哪个有 app\version.py 就升哪个。
+
+要指定目录，三种办法都行：
+  · 双击 exe 时后面带参数：灵犀-v4.0.0-安装升级.exe -Target "D:\GJ\lingxi"
+  · 设环境变量：set LINGXI_HOME=D:\GJ\lingxi
+  · 直接跑 bat：安装升级.bat -Target "D:\GJ\lingxi" -NoStart
+
+其它开关：
+  -Force     版本号一样也重装一遍
+  -NoStart   升级完不自动启动
+
+三、升级完怎么确认
+------------------
+  · 打开 http://127.0.0.1:8199/health  → version 应该是 4.0.0
+  · 界面右下角 / 控制台 F12 里能看到 v4.0.0 build 2026-11-23-17:30
+  · 知识库页应该看到分好的几个库：设计·印前 / 个人笔记 / 网络剪藏 / 存档资料 / 佛道·文史
+
+四、出问题怎么退回去
+--------------------
+  · 过程日志：包根目录 installer.log
+  · 旧程序备份：安装目录 backups\upgrade-v<旧版本>-<时间>.zip
+  · 退版本：停服务 → 把备份 zip 里的 app\ 解压覆盖回去 → 启动
+  · 数据没动过，所以退回旧版程序照样能读 4.0 的库（分库文件在 data\index\kb\）

@@ -50,7 +50,7 @@ def _set(**kw) -> None:                                          # noqa: ANN003
 
 _PICK_CACHE: dict = {"at": 0.0, "base": "", "cands": []}
 _PICK_TTL = 120.0          # 探测结果缓存 120 秒（切网络后最多等两分钟）
-_PICK_TIMEOUT = 2.0        # 单个地址探测超时（内网 2 秒连不上基本就是不在同一个网）
+_PICK_TIMEOUT = 1.2        # 单个地址探测超时（内网 1.2 秒连不上基本就是不在同一个网）
 
 
 def servers(cfg) -> list[str]:                                   # noqa: ANN001
@@ -88,8 +88,26 @@ def _probe(base: str) -> bool:
         return False
 
 
+_PICK_CACHE = {"at": 0.0, "value": ""}          # 探测结果缓存（60 秒）★2026-11-20
+
+
 def pick_server(cfg, force: bool = False) -> str:                 # noqa: ANN001
-    """挑一个当前能用的服务器地址：**内网优先，外网兜底**。
+    """选一个能连上的服务器地址（内网优先）。
+
+    ★ 2026-11-20：以前每次调用都同步开 TCP，服务器不通时一次耗十几秒，
+      而 `get_sync` 是 async 接口 → 整个事件循环被堵（/health 十几秒、界面「服务未就绪」）✗
+      现在：结果缓存 60 秒 + 单地址超时 1.2 秒；调用方还可以 force 绕过缓存 ✓
+    """
+    now = time.time()
+    if not force and _PICK_CACHE["value"] and now - _PICK_CACHE["at"] < 60:
+        return _PICK_CACHE["value"]
+    value = _pick_server_uncached(cfg)
+    _PICK_CACHE.update({"at": now, "value": value})
+    return value
+
+
+def _pick_server_uncached(cfg) -> str:                 # noqa: ANN001
+    """内部实现（不要直接调，走 pick_server 才有缓存）。原说明：挑一个当前能用的服务器地址：**内网优先，外网兜底**。
 
     结果缓存 120 秒；`force=True` 立刻重探（设置页"试连"用它）。
     """

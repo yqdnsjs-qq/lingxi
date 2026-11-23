@@ -7,6 +7,58 @@
 <title>宇之语 · 灵犀 · 本地文件与知识中枢</title>
 
 <link rel="stylesheet" href="/static/app.e15c143a3e2f.css">
+<style>
+/* ===== 左栏（仿 DSH，2026-11-20 项目主） ===== */
+body{min-height:100vh}
+.layout{display:flex;align-items:flex-start;gap:12px;padding:12px 16px 0}
+#tabbar.rail{position:sticky;top:12px;display:flex;flex-direction:column;gap:4px;
+  width:212px;flex:0 0 auto;margin:0;padding:8px;background:var(--panel);
+  border:1px solid var(--line);border-radius:14px;height:calc(100vh - 100px);min-height:320px}
+#tabbar.rail button{display:flex;align-items:center;gap:10px;width:100%;
+  padding:10px 12px;white-space:nowrap;overflow:hidden;text-align:left}
+#tabbar.rail .ic{width:22px;flex:0 0 auto;text-align:center;font-size:16px}
+#tabbar.rail .rail-gap{flex:1 1 auto;min-height:14px}
+#rail-toggle{position:absolute;left:236px;top:0;width:auto;height:auto;padding:2px 6px;
+  background:transparent;border:0;color:var(--muted);font-size:12px;cursor:pointer;display:none}
+body.rail-min .layout{padding-left:10px}
+body.rail-min #tabbar.rail{width:60px;padding:6px}
+body.rail-min #tabbar.rail button{justify-content:center;padding:10px 0}
+body.rail-min #tabbar.rail .tx{display:none}
+body.rail-min #tabbar.rail i{display:none}
+main{flex:1 1 auto;min-width:0;max-width:none;margin:0;padding:6px 6px 70px}
+/* 折叠把手：贴在左栏标题上的小箭头 */
+#tabbar.rail .rail-fold{display:flex;align-items:center;justify-content:flex-end;
+  height:26px;margin:-2px 2px 2px;border:0;background:transparent;color:var(--muted);
+  cursor:pointer;font-size:12px;width:auto;padding:0}
+#tabbar.rail .rail-fold:hover{color:var(--fg);background:transparent}
+body.rail-min #tabbar.rail .rail-fold{justify-content:center}
+@media (max-width:760px){
+  .layout{padding:8px 8px 0}
+  #tabbar.rail{width:60px;padding:6px}
+  #tabbar.rail .tx{display:none}
+  main{padding:4px 2px 60px}
+}
+
+/* ===== 外观（浅色/深色/跟随系统，2026-11-20 项目主） ===== */
+html[data-theme="light"]{
+  --bg:#f4f6fb; --panel:#ffffff; --panel2:#eef2f8; --line:#d6dde9;
+  --fg:#1b2230; --muted:#5d6a80; --accent:#2f6fed; --ok:#12a06a; --warn:#b26b00; --bad:#c62828;
+}
+html[data-theme="light"] .badge{background:#e6ecf7;color:#41506a}
+html[data-theme="light"] .badge.ok{background:rgba(18,160,106,.14);color:#0b7d52}
+html[data-theme="light"] .badge.err{background:rgba(198,40,40,.12);color:#a31616}
+html[data-theme="light"] .badge.mode{background:rgba(47,111,237,.12);color:#1f57c0}
+html[data-theme="light"] header{background:#fff}
+.theme-grid{display:flex;gap:12px;flex-wrap:wrap}
+.theme-op{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;
+  min-width:152px;padding:18px 26px;background:var(--panel2);border:1px solid var(--line);
+  border-radius:12px;color:var(--fg);font-weight:400;font-size:13.5px;cursor:pointer}
+.theme-op:hover{border-color:var(--accent)}
+.theme-op .tico{font-size:22px;line-height:1;color:var(--muted)}
+.theme-op.on{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:var(--panel)}
+.theme-op.on .tico{color:var(--accent)}
+</style>
+
 </head>
 <body>
 <div id="eg2-errbar" style="display:none;position:fixed;left:0;right:0;bottom:0;z-index:99999;background:#5a1f1f;color:#ffd9d9;padding:9px 14px;font:12.5px/1.6 Consolas,monospace;max-height:38vh;overflow:auto;border-top:2px solid #ff8f8f"><b>页面出错了（把下面这段发给开发者就能定位）</b><button id="eg2-errclose" style="float:right;background:#7a2c2c;color:#fff;border:0;border-radius:6px;padding:2px 10px;cursor:pointer">关闭</button><div id="eg2-errbody" style="margin-top:6px;white-space:pre-wrap"></div></div>
@@ -45,12 +97,15 @@
   <!-- 用户牌固定挂在这里（原来用 position:fixed 浮在右上角，会压住上面两个链接 ✗ 2026-10-22 改） -->
   <div id="eg2-user-slot" class="hdr-user"></div>
 </header>
-  <nav class="tabbar" id="tabbar">
-    <button data-tab="chat2">💬 聊天</button>
-    <button data-tab="search" class="on">🔍 搜索</button>
-    <button data-tab="kb">📚 知识库</button>
-    <button data-tab="folders">📁 文件夹</button>
-    <button data-tab="settings">⚙ 设置</button>
+  <!-- 左栏（仿 DSH）：上面 聊天/搜索/知识库，下面 设置；文件夹已并入设置（2026-11-20 项目主） -->
+  <div class="layout">
+  <nav class="tabbar rail" id="tabbar">
+    <button class="rail-fold" id="rail-fold" title="收起/展开左栏">«</button>
+    <button data-tab="chat2" title="聊天"><span class="ic">💬</span><span class="tx">聊天</span></button>
+    <button data-tab="search" class="on" title="搜索"><span class="ic">🔍</span><span class="tx">搜索</span></button>
+    <button data-tab="kb" title="知识库"><span class="ic">📚</span><span class="tx">知识库</span></button>
+    <div class="rail-gap"></div>
+    <button data-tab="settings" title="设置"><span class="ic">⚙</span><span class="tx">设置</span></button>
   </nav>
 
 
@@ -210,7 +265,23 @@
   </div>
 </section>
 
-<section class="tabpane" data-pane="folders">
+
+
+  <section class="tabpane" data-pane="settings">
+  <!-- 文件夹从主标签挪进设置（2026-11-20 项目主） -->
+  <!-- 设置页按用途分 4 类（2026-10-22 项目主："功能最好归类，不要分散了"；
+       顺序与命名由项目主定：服务器与共享 / 模型与系统设置 / 人物命名 / 备份与恢复）。 -->
+  <div class="subnav" id="set-nav">
+    <button data-grp="folders" class="on">📁 文件夹</button>
+    <button data-grp="server">🌐 服务器与共享</button>
+    <button data-grp="model">🧠 模型与系统设置</button>
+    <button data-grp="people">👤 人物命名</button>
+    <button data-grp="backup">💾 备份与恢复</button>
+    <button data-grp="theme">🎨 外观</button>
+  </div>
+  <div id="set-groups">
+    <section class="grp" data-grp="folders">
+  <div class="hint" style="margin:0 2px 10px">这里管「哪些文件夹入库、怎么扫、归哪个类」，和服务器、模型那些设置并列。</div>
   <!-- 文件夹页（2026-10-22 项目主定的主标签：聊天 / 搜索 / 知识库 / 文件夹 / 设置）。
        人物已经挪到「设置 → 人物命名」；这里只管建库、索引与统计。 -->
   <!-- 文件夹 -->
@@ -234,6 +305,9 @@
         <option value="category">按归类（用途类别）</option>
       </select>
       <button class="ghost tiny" id="cat-settings" title="改这 5 个用途的默认扫描口径，或者自己加类别">⚙ 类别设置</button>
+      <a href="/static/kb.html" id="kb-admin-link"
+         title="4.0 分类知识库：每个库一个独立文件，按类别分工、按需开放"
+         style="display:inline-flex;align-items:center;gap:4px;text-decoration:none;border:1px solid #3d4a66;border-radius:6px;padding:3px 9px;color:#dfe6f5;font-size:12px">🗂 分类知识库</a>
     </div>
     <div class="toolbar" id="night-toolbar" style="margin-bottom:8px">
       <button class="ghost tiny" id="btn-plan"
@@ -303,21 +377,23 @@
     <div class="grid" id="stats"></div>
   </div>
   </section>
-
-  <section class="tabpane" data-pane="settings">
-  <!-- 设置页按用途分 4 类（2026-10-22 项目主："功能最好归类，不要分散了"；
-       顺序与命名由项目主定：服务器与共享 / 模型与系统设置 / 人物命名 / 备份与恢复）。 -->
-  <div class="subnav" id="set-nav">
-    <button data-grp="server" class="on">🌐 服务器与共享</button>
-    <button data-grp="model">🧠 模型与系统设置</button>
-    <button data-grp="people">👤 人物命名</button>
-    <button data-grp="backup">💾 备份与恢复</button>
-  </div>
-  <div id="set-groups">
     <section class="grp" data-grp="server"></section>
     <section class="grp" data-grp="model"></section>
     <section class="grp" data-grp="people"></section>
     <section class="grp" data-grp="backup"></section>
+    <section class="grp" data-grp="theme">
+      <div class="card" id="theme-card">
+        <h2>外观</h2>
+        <div class="hint" style="margin-bottom:12px">
+          挑一个顺眼的。选「跟随系统」就跟 Windows 的深浅色走，系统一切换这里立刻跟着变 ✓</div>
+        <div class="theme-grid">
+          <button class="theme-op" data-theme="light" type="button"><span class="tico">☀</span><span>浅色</span></button>
+          <button class="theme-op" data-theme="dark" type="button"><span class="tico">☾</span><span>深色</span></button>
+          <button class="theme-op" data-theme="auto" type="button"><span class="tico">▣</span><span>跟随系统</span></button>
+        </div>
+        <div class="hint" id="theme-msg" style="margin-top:10px"></div>
+      </div>
+    </section>
   </div>
 
   <!-- 👤 人物命名（2026-10-22 项目主：人物从主标签挪进设置，和备份那些同级） -->
@@ -470,7 +546,11 @@
     <!-- 服务端算出来的"你能用的模型"（自己的 + 服务器公用/别人共享的），只读 -->
     <div id="rm-srvlist"></div>
     <div id="rm-slotbar" style="margin-bottom:10px"></div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+    <!-- ★ 2026-11-20 项目主："这些也做成可折叠方式吧" —— 编辑表单默认收起，
+         点「编辑这套」/「新增一套」才展开，卡片不再一屏塞满 ✓ -->
+    <details class="more" id="rm-form" style="margin-bottom:10px">
+      <summary><b>✎ 编辑这一套</b>：地址 / 密钥 / 请求头 / 模型 / 试一张</summary>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0 10px">
       <input type="text" id="rm-url" placeholder="http://192.168.1.50:11434 或 http://IP:8080/v1"
              style="flex:1;min-width:260px;padding:6px 10px;border-radius:8px;
                     border:1px solid var(--line);background:var(--panel2);color:var(--fg)">
@@ -520,6 +600,7 @@
       <button class="ghost" id="rm-test">拿真图试一张</button>
     </div>
     <div class="hint" id="rm-out"></div>
+    </details>
   </div>
 
   <!-- 图片打标（VL） -->
@@ -828,6 +909,7 @@
   </section>
 
 </main>
+ </div><!-- /.layout -->
 
 <!-- 目录选择器（多选） -->
 <div class="modal" id="modal">
@@ -902,6 +984,23 @@
 
 
 
-<script src="/static/app.1b40aaa64d91.js"></script>
+<script src="/static/app.b2b97310e162.js"></script>
+
+<!-- 分类知识库：在界面里弹一层，不再另开窗口（2026-11-20 项目主反馈） -->
+<div id="kb-admin-mask" style="display:none;position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(6,10,18,.72);z-index:9998">
+  <div style="position:absolute;left:18px;right:18px;top:18px;bottom:18px;display:flex;flex-direction:column;
+              background:var(--panel,#111827);border:1px solid var(--line,#2a3550);border-radius:12px;overflow:hidden;
+              box-shadow:0 18px 60px rgba(0,0,0,.45)">
+    <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--line,#2a3550)">
+      <b style="font-size:13px">分类知识库</b>
+      <span style="font-size:12px;color:var(--muted,#8fa0bd)">每个库一个独立文件；挂文件夹、授权、索引都在这页</span>
+      <span style="flex:1"></span>
+      <button id="kb-admin-close" style="padding:3px 12px;border-radius:6px;border:1px solid var(--line,#2a3550);
+              background:var(--panel2,#1b2334);color:var(--fg,#dfe6f5);cursor:pointer;font-size:12px">关闭</button>
+    </div>
+    <iframe id="kb-admin-frame" src="about:blank" title="分类知识库"
+            style="flex:1;border:0;width:100%;background:#0b1020"></iframe>
+  </div>
+</div>
 </body>
 </html>
